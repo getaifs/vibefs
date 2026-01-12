@@ -140,7 +140,9 @@ fn collect_session_info(vibe_dir: &Path) -> Result<Vec<SessionInfo>> {
     }
 
     let metadata_path = vibe_dir.join("metadata.db");
-    let metadata = MetadataStore::open(&metadata_path)?;
+    // Try to open read-only first (in case daemon is running)
+    let metadata = MetadataStore::open_readonly(&metadata_path)
+        .or_else(|_| MetadataStore::open(&metadata_path))?;
 
     for entry in std::fs::read_dir(&sessions_dir)? {
         let entry = entry?;

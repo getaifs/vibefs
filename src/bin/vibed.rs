@@ -1,9 +1,10 @@
 //! vibed - VibeFS Background Daemon
-//!
+//! 
 //! The ephemeral daemon that serves the NFSv4 virtual filesystem.
 //! It manages sessions, handles NFS requests, and auto-shutdowns after idleness.
 
 use anyhow::{Context, Result};
+use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,31 +15,29 @@ use tokio::sync::{Mutex, RwLock};
 
 use vibefs::db::MetadataStore;
 use vibefs::git::GitRepo;
+use vibefs::nfs::VibeNFS;
 
 /// Default idle timeout: 20 minutes
 const IDLE_TIMEOUT_SECS: u64 = 20 * 60;
 
 /// Session state managed by the daemon
-#[allow(dead_code)]
 struct Session {
     vibe_id: String,
+    #[allow(dead_code)]
     session_dir: PathBuf,
     mount_point: PathBuf,
     nfs_port: u16,
     created_at: Instant,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>
 }
 
 /// Daemon state shared across handlers
 struct DaemonState {
     repo_path: PathBuf,
-    #[allow(dead_code)]
     metadata: Arc<RwLock<MetadataStore>>,
-    #[allow(dead_code)]
     git: Arc<RwLock<GitRepo>>,
     sessions: HashMap<String, Session>,
-    last_activity: Instant,
-    nfs_listener: Option<std::net::TcpListener>,
-    nfs_port: u16,
+    last_activity: Instant
 }
 
 impl DaemonState {
@@ -66,7 +65,7 @@ enum DaemonRequest {
     /// List active sessions
     ListSessions,
     /// Graceful shutdown
-    Shutdown,
+    Shutdown
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -88,11 +87,11 @@ enum DaemonResponse {
         vibe_id: String,
     },
     Sessions {
-        sessions: Vec<SessionInfo>,
+        sessions: Vec<SessionInfo>
     },
     ShuttingDown,
     Error {
-        message: String,
+        message: String
     },
 }
 
@@ -101,7 +100,7 @@ struct SessionInfo {
     vibe_id: String,
     mount_point: String,
     nfs_port: u16,
-    uptime_secs: u64,
+    uptime_secs: u64
 }
 
 /// Get the Unix Domain Socket path for a repository
@@ -114,15 +113,6 @@ fn get_socket_path(repo_path: &Path) -> PathBuf {
 fn get_pid_path(repo_path: &Path) -> PathBuf {
     let vibe_dir = repo_path.join(".vibe");
     vibe_dir.join("vibed.pid")
-}
-
-/// Find an available high port for NFS
-fn find_available_port() -> Result<(std::net::TcpListener, u16)> {
-    // Bind to port 0 to let OS assign a free high port
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .context("Failed to bind to any port")?;
-    let port = listener.local_addr()?.port();
-    Ok((listener, port))
 }
 
 /// Handle a single client connection
@@ -163,17 +153,17 @@ async fn handle_client(
                 let state = state.lock().await;
                 DaemonResponse::Status {
                     repo_path: state.repo_path.display().to_string(),
-                    nfs_port: state.nfs_port,
+                    nfs_port: 0, // Using per-session ports now
                     session_count: state.sessions.len(),
                     uptime_secs: start_time.elapsed().as_secs(),
                 }
             }
 
             DaemonRequest::ExportSession { vibe_id } => {
-                let mut state = state.lock().await;
+                let mut state_guard = state.lock().await;
 
                 // Check if session already exists
-                if let Some(session) = state.sessions.get(&vibe_id) {
+                if let Some(session) = state_guard.sessions.get(&vibe_id) {
                     DaemonResponse::SessionExported {
                         vibe_id: session.vibe_id.clone(),
                         nfs_port: session.nfs_port,
@@ -181,37 +171,74 @@ async fn handle_client(
                     }
                 } else {
                     // Create new session
-                    let session_dir = state.repo_path.join(".vibe/sessions").join(&vibe_id);
+                    let session_dir = state_guard.repo_path.join(".vibe/sessions").join(&vibe_id);
                     let mount_point = PathBuf::from(format!(
                         "{}/Library/Caches/vibe/mounts/{}",
                         std::env::var("HOME").unwrap_or_default(),
                         vibe_id
                     ));
 
-                    // Create directories
-                    if let Err(e) = std::fs::create_dir_all(&session_dir) {
-                        DaemonResponse::Error {
-                            message: format!("Failed to create session dir: {}", e),
-                        }
-                    } else if let Err(e) = std::fs::create_dir_all(&mount_point) {
-                        DaemonResponse::Error {
-                            message: format!("Failed to create mount point: {}", e),
-                        }
-                    } else {
-                        let session = Session {
-                            vibe_id: vibe_id.clone(),
-                            session_dir,
-                            mount_point: mount_point.clone(),
-                            nfs_port: state.nfs_port,
-                            created_at: Instant::now(),
-                        };
+                    match setup_session_resources(&session_dir, &mount_point) {
+                        Ok(_) => {
+                            let nfs = VibeNFS::new(
+                                state_guard.metadata.clone(), 
+                                state_guard.git.clone(), 
+                                session_dir.clone(), 
+                                vibe_id.clone()
+                            );
+                            
+                            if let Err(e) = nfs.build_directory_cache().await {
+                                DaemonResponse::Error {
+                                    message: format!("Failed to build cache: {}", e),
+                                }
+                            } else {
+                                // Bind NFS listener
+                                match NFSTcpListener::bind("127.0.0.1:0", nfs).await {
+                                    Ok(listener) => {
+                                        let port = listener.get_listen_port();
+                                        let (sess_shutdown_tx, mut sess_shutdown_rx) = tokio::sync::broadcast::channel(1);
+                                        let vid = vibe_id.clone();
+                                        
+                                        // Spawn NFS server task
+                                        tokio::spawn(async move {
+                                            eprintln!("[vibed] NFS server running for {} on port {}", vid, port);
+                                            tokio::select! {
+                                                res = listener.handle_forever() => {
+                                                    if let Err(e) = res {
+                                                        eprintln!("[vibed] NFS server error for {}: {}", vid, e);
+                                                    }
+                                                }
+                                                _ = sess_shutdown_rx.recv() => {
+                                                    eprintln!("[vibed] Stopping NFS server for {}", vid);
+                                                }
+                                            }
+                                        });
 
-                        state.sessions.insert(vibe_id.clone(), session);
+                                        let session = Session {
+                                            vibe_id: vibe_id.clone(),
+                                            session_dir,
+                                            mount_point: mount_point.clone(),
+                                            nfs_port: port,
+                                            created_at: Instant::now(),
+                                            shutdown_tx: sess_shutdown_tx,
+                                        };
 
-                        DaemonResponse::SessionExported {
-                            vibe_id,
-                            nfs_port: state.nfs_port,
-                            mount_point: mount_point.display().to_string(),
+                                        state_guard.sessions.insert(vibe_id.clone(), session);
+
+                                        DaemonResponse::SessionExported {
+                                            vibe_id,
+                                            nfs_port: port,
+                                            mount_point: mount_point.display().to_string(),
+                                        }
+                                    }
+                                    Err(e) => DaemonResponse::Error {
+                                        message: format!("Failed to bind NFS port: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => DaemonResponse::Error {
+                            message: format!("Failed to create directories: {}", e),
                         }
                     }
                 }
@@ -219,7 +246,9 @@ async fn handle_client(
 
             DaemonRequest::UnexportSession { vibe_id } => {
                 let mut state = state.lock().await;
-                if state.sessions.remove(&vibe_id).is_some() {
+                if let Some(session) = state.sessions.remove(&vibe_id) {
+                    // Stop the NFS server for this session
+                    let _ = session.shutdown_tx.send(());
                     DaemonResponse::SessionUnexported { vibe_id }
                 } else {
                     DaemonResponse::Error {
@@ -258,20 +287,9 @@ async fn handle_client(
     Ok(())
 }
 
-/// Run the NFS server (placeholder - actual NFS implementation in separate module)
-async fn run_nfs_server(
-    _listener: std::net::TcpListener,
-    _state: Arc<Mutex<DaemonState>>,
-    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) -> Result<()> {
-    // Note: In the full implementation, this would use nfsserve to handle NFS requests.
-    // For now, we keep the listener active so the port stays reserved.
-
-    eprintln!("[vibed] NFS server placeholder running (actual NFS not yet integrated)");
-
-    // Wait for shutdown signal
-    let _ = shutdown_rx.recv().await;
-
+fn setup_session_resources(session_dir: &Path, mount_point: &Path) -> Result<()> {
+    std::fs::create_dir_all(session_dir)?;
+    std::fs::create_dir_all(mount_point)?;
     Ok(())
 }
 
@@ -327,14 +345,7 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
         std::fs::remove_file(&socket_path).ok();
     }
 
-    // Find available port for NFS
-    let (nfs_listener, nfs_port) = find_available_port()?;
-
-    eprintln!(
-        "[vibed] Starting daemon for {} (NFS port: {})",
-        repo_path.display(),
-        nfs_port
-    );
+    eprintln!("[vibed] Starting daemon for {}", repo_path.display());
 
     // Open metadata and git
     let metadata = MetadataStore::open(vibe_dir.join("metadata.db"))
@@ -348,8 +359,6 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
         git: Arc::new(RwLock::new(git)),
         sessions: HashMap::new(),
         last_activity: Instant::now(),
-        nfs_listener: Some(nfs_listener),
-        nfs_port,
     }));
 
     // Write PID file
@@ -364,19 +373,6 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
     // Shutdown channel
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
     let start_time = Instant::now();
-
-    // Start NFS server task
-    let nfs_state = state.clone();
-    let nfs_shutdown_rx = shutdown_tx.subscribe();
-    let nfs_listener = {
-        let mut s = state.lock().await;
-        s.nfs_listener.take().unwrap()
-    };
-    let nfs_handle = tokio::spawn(async move {
-        if let Err(e) = run_nfs_server(nfs_listener, nfs_state, nfs_shutdown_rx).await {
-            eprintln!("[vibed] NFS server error: {}", e);
-        }
-    });
 
     // Start idle checker task
     let idle_state = state.clone();
@@ -418,9 +414,16 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
     eprintln!("[vibed] Cleaning up...");
     std::fs::remove_file(&socket_path).ok();
     std::fs::remove_file(&pid_path).ok();
+    
+    // Stop all sessions
+    {
+        let mut s = state.lock().await;
+        for (_, session) in s.sessions.drain() {
+            let _ = session.shutdown_tx.send(());
+        }
+    }
 
-    // Wait for tasks to finish
-    nfs_handle.abort();
+    // Wait for tasks to finish (idle checker)
     idle_handle.abort();
 
     if !foreground {
@@ -430,8 +433,7 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     use clap::{Arg, Command};
 
     let matches = Command::new("vibed")
@@ -462,7 +464,10 @@ async fn main() -> Result<()> {
 
     if foreground {
         // Run directly in foreground
-        run_daemon(repo_path, true).await
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()? 
+            .block_on(run_daemon(repo_path, true))
     } else {
         // Daemonize
         use daemonize::Daemonize;
@@ -480,7 +485,6 @@ async fn main() -> Result<()> {
         match daemonize.start() {
             Ok(_) => {
                 // We're now in the daemon process
-                // Re-initialize tokio runtime since fork() invalidates it
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()?

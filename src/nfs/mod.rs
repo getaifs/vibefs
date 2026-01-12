@@ -20,6 +20,7 @@ use crate::git::GitRepo;
 const ROOT_INODE: fileid3 = 1;
 
 /// VibeFS NFS filesystem implementation
+#[derive(Clone)]
 pub struct VibeNFS {
     metadata: Arc<RwLock<MetadataStore>>,
     git: Arc<RwLock<GitRepo>>,

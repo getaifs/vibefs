@@ -31,6 +31,15 @@ impl MetadataStore {
         Ok(Self { db })
     }
 
+    /// Open metadata store in read-only mode
+    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let opts = Options::default();
+        let db = DB::open_for_read_only(&opts, path, false)
+            .context("Failed to open RocksDB in read-only mode")?;
+
+        Ok(Self { db })
+    }
+
     /// Store inode metadata with both forward and reverse mappings
     pub fn put_inode(&self, inode_id: u64, metadata: &InodeMetadata) -> Result<()> {
         let key = format!("inode:{}", inode_id);
