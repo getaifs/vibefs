@@ -28,12 +28,12 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
     let metadata_path = vibe_dir.join("metadata.db");
     let metadata = MetadataStore::open(&metadata_path)
         .context("Failed to open metadata store")?;
-    let metadata = Arc::new(RwLock::new(metadata));
+    let _metadata = Arc::new(RwLock::new(metadata));
 
     // Open Git repository
     let git = GitRepo::open(repo_path)
         .context("Failed to open Git repository")?;
-    let git = Arc::new(RwLock::new(git));
+    let _git = Arc::new(RwLock::new(git));
 
     // Create mount point
     let mount_point = PathBuf::from("/tmp/vibe").join(vibe_id);

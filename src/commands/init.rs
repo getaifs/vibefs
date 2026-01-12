@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::db::{InodeMetadata, MetadataStore};
 use crate::git::GitRepo;

@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
-use std::process::Command;
 
 /// Create a zero-cost snapshot of a vibe session
 pub async fn snapshot<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
@@ -69,6 +68,9 @@ fn copy_with_clonefile(src: &Path, dst: &Path) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn copy_with_reflink(src: &Path, dst: &Path) -> Result<()> {
+    use anyhow::Context;
+    use std::process::Command;
+
     // Try cp with --reflink=always for CoW copy on Btrfs/XFS
     let output = Command::new("cp")
         .arg("-r")
@@ -87,6 +89,7 @@ fn copy_with_reflink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
 
