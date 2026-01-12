@@ -60,4 +60,9 @@ pub mod daemon_ipc {
     pub fn get_socket_path(repo_path: &std::path::Path) -> std::path::PathBuf {
         repo_path.join(".vibe").join("vibed.sock")
     }
+
+    /// Get the PID file path for a repository
+    pub fn get_pid_path(repo_path: &std::path::Path) -> std::path::PathBuf {
+        repo_path.join(".vibe").join("vibed.pid")
+    }
 }

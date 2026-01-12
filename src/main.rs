@@ -91,6 +91,13 @@ enum Commands {
 
     /// Show daemon and session status
     Status,
+
+    /// Clean up all VibeFS data for this repository
+    Purge {
+        /// Force purge without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -321,6 +328,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Commands::Purge { force } => {
+            commands::purge::purge(&repo_path, force).await?;
         }
     }
 

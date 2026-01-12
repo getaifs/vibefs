@@ -109,11 +109,7 @@ fn get_socket_path(repo_path: &Path) -> PathBuf {
     vibe_dir.join("vibed.sock")
 }
 
-/// Get the PID file path
-fn get_pid_path(repo_path: &Path) -> PathBuf {
-    let vibe_dir = repo_path.join(".vibe");
-    vibe_dir.join("vibed.pid")
-}
+use vibefs::daemon_ipc::get_pid_path;
 
 /// Handle a single client connection
 async fn handle_client(
