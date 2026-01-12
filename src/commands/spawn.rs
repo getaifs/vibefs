@@ -60,8 +60,8 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
                     println!("⚠ Auto-mount failed: {}", e);
                     println!("\n  To mount manually, run:");
                     println!(
-                        "  mount_nfs -o vers=4,tcp,port={},resvport,nolock,locallocks localhost:/{} {}",
-                        nfs_port, vibe_id, mount_point
+                        "  mount_nfs -o vers=3,tcp,port={},mountport={},resvport,nolock,locallocks localhost:/ {}",
+                        nfs_port, nfs_port, mount_point
                     );
                 }
             }
@@ -86,16 +86,17 @@ fn mount_nfs(mount_point: &str, port: u16) -> Result<()> {
 
     // macOS mount_nfs options for user-space mounting
     // -o resvport: Use reserved ports (allows non-root mount on macOS)
-    // -o vers=4: Use NFSv4
+    // -o vers=3: Use NFSv3 (nfsserve is v3)
     // -o tcp: Use TCP transport
     // -o port=<port>: Connect to specified port
+    // -o mountport=<port>: Use same port for MOUNT protocol (nfsserve multiplexes)
     // -o nolock,locallocks: Disable NFS locking (we handle it ourselves)
     let output = Command::new("mount_nfs")
         .args([
             "-o",
             &format!(
-                "vers=4,tcp,port={},resvport,nolock,locallocks,noacl,soft,retrans=2,timeo=5",
-                port
+                "vers=3,tcp,port={},mountport={},resvport,nolock,locallocks,noacl,soft,retrans=2,timeo=5",
+                port, port
             ),
             &format!("localhost:/"),
             mount_point,
