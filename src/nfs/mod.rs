@@ -53,15 +53,7 @@ impl VibeNFS {
         let mut cache = self.dir_children.write().await;
 
         // Get all inodes and build parent-child relationships
-        let mut all_entries: Vec<(fileid3, InodeMetadata)> = Vec::new();
-
-        // We need to iterate through all inodes - this is a simplified approach
-        // In production, we'd want a more efficient index in RocksDB
-        for i in 1..=10000 {
-            if let Ok(Some(meta)) = store.get_inode(i) {
-                all_entries.push((i, meta));
-            }
-        }
+        let all_entries = store.get_all_inodes()?;
 
         // Build directory tree
         for (inode, meta) in &all_entries {

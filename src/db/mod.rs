@@ -143,6 +143,26 @@ impl MetadataStore {
         Ok(paths)
     }
 
+    /// Get all inodes
+    pub fn get_all_inodes(&self) -> Result<Vec<(u64, InodeMetadata)>> {
+        let prefix = b"inode:";
+        let mut inodes = Vec::new();
+
+        let iter = self.db.prefix_iterator(prefix);
+        for item in iter {
+            let (key, value) = item?;
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(id_str) = key_str.strip_prefix("inode:") {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    let metadata: InodeMetadata = serde_json::from_slice(&value)?;
+                    inodes.push((id, metadata));
+                }
+            }
+        }
+
+        Ok(inodes)
+    }
+
     /// Clear all dirty marks
     pub fn clear_dirty(&self) -> Result<()> {
         let prefix = b"dirty:";
