@@ -1,0 +1,273 @@
+use anyhow::{Context, Result};
+use gix::{ObjectId, Repository, Tree};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Git repository interface for VibeFS
+/// Wrapped in Mutex to make it thread-safe for async contexts
+pub struct GitRepo {
+    repo: Mutex<Repository>,
+}
+
+impl GitRepo {
+    /// Open an existing Git repository
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let repo = gix::open(path)
+            .context("Failed to open Git repository")?;
+        Ok(Self { repo: Mutex::new(repo) })
+    }
+
+    /// Get the current HEAD commit
+    pub fn head_commit(&self) -> Result<gix::Commit> {
+        let repo = self.repo.lock().unwrap();
+        let head = repo.head()?;
+        let commit = head.peel_to_commit_in_place()?;
+        Ok(commit)
+    }
+
+    /// Get the tree for the current HEAD
+    pub fn head_tree(&self) -> Result<Tree> {
+        let commit = self.head_commit()?;
+        let tree = commit.tree()?;
+        Ok(tree)
+    }
+
+    /// Read a blob by OID
+    pub fn read_blob(&self, oid: &str) -> Result<Vec<u8>> {
+        let object_id = ObjectId::from_hex(oid.as_bytes())?;
+        let repo = self.repo.lock().unwrap();
+        let object = repo.find_object(object_id)?;
+
+        if object.kind != gix::object::Kind::Blob {
+            anyhow::bail!("Object is not a blob");
+        }
+
+        Ok(object.data.to_vec())
+    }
+
+    /// Hash a new blob and write it to the object database
+    pub fn write_blob(&self, data: &[u8]) -> Result<String> {
+        let repo = self.repo.lock().unwrap();
+        let odb = repo.objects.clone();
+        let oid = odb.write_buf(gix::object::Kind::Blob, data)?;
+        Ok(oid.to_string())
+    }
+
+    /// Walk the tree and collect all file paths with their OIDs
+    pub fn walk_tree(&self, tree: &Tree) -> Result<Vec<(PathBuf, String, bool)>> {
+        let mut entries = Vec::new();
+        self.walk_tree_recursive(tree, PathBuf::new(), &mut entries)?;
+        Ok(entries)
+    }
+
+    fn walk_tree_recursive(
+        &self,
+        tree: &Tree,
+        prefix: PathBuf,
+        entries: &mut Vec<(PathBuf, String, bool)>,
+    ) -> Result<()> {
+        for entry in tree.iter() {
+            let entry = entry?;
+            let name = entry.filename().to_string();
+            let path = prefix.join(&name);
+            let oid = entry.oid().to_string();
+
+            match entry.mode() {
+                gix::object::tree::EntryMode::Tree => {
+                    entries.push((path.clone(), oid.clone(), true));
+                    let subtree = entry.object()?.into_tree();
+                    self.walk_tree_recursive(&subtree, path, entries)?;
+                }
+                gix::object::tree::EntryMode::Blob |
+                gix::object::tree::EntryMode::BlobExecutable => {
+                    entries.push((path, oid, false));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a new tree from a list of entries
+    pub fn create_tree(&self, entries: Vec<TreeEntry>) -> Result<String> {
+        let mut tree_entries = Vec::new();
+
+        for entry in entries {
+            let oid = ObjectId::from_hex(entry.oid.as_bytes())?;
+            let mode = if entry.is_dir {
+                gix::object::tree::EntryMode::Tree
+            } else if entry.executable {
+                gix::object::tree::EntryMode::BlobExecutable
+            } else {
+                gix::object::tree::EntryMode::Blob
+            };
+
+            tree_entries.push(gix::objs::tree::Entry {
+                mode: mode.into(),
+                filename: entry.name.into(),
+                oid: oid.into(),
+            });
+        }
+
+        // Sort entries as Git requires
+        tree_entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+        let tree_obj = gix::objs::Tree { entries: tree_entries };
+        let mut buf = Vec::new();
+        tree_obj.write_to(&mut buf)?;
+
+        let repo = self.repo.lock().unwrap();
+        let odb = repo.objects.clone();
+        let oid = odb.write_buf(gix::object::Kind::Tree, &buf)?;
+        Ok(oid.to_string())
+    }
+
+    /// Create a commit with the given tree and parent
+    pub fn create_commit(
+        &self,
+        tree_oid: &str,
+        parent_oid: &str,
+        message: &str,
+    ) -> Result<String> {
+        let tree_id = ObjectId::from_hex(tree_oid.as_bytes())?;
+        let parent_id = ObjectId::from_hex(parent_oid.as_bytes())?;
+
+        let repo = self.repo.lock().unwrap();
+        let config = repo.config_snapshot();
+        let author = config.user()?.name;
+        let email = config.user()?.email;
+
+        let signature = gix::actor::Signature {
+            name: author.unwrap_or("VibeFS".into()).into(),
+            email: email.unwrap_or("vibe@localhost".into()).into(),
+            time: gix::date::Time::now_local_or_utc(),
+        };
+
+        let commit_obj = gix::objs::Commit {
+            tree: tree_id.into(),
+            parents: vec![parent_id.into()].into(),
+            author: signature.clone(),
+            committer: signature,
+            encoding: None,
+            message: message.into(),
+            extra_headers: vec![],
+        };
+
+        let mut buf = Vec::new();
+        commit_obj.write_to(&mut buf)?;
+
+        let odb = repo.objects.clone();
+        let oid = odb.write_buf(gix::object::Kind::Commit, &buf)?;
+        Ok(oid.to_string())
+    }
+
+    /// Update a reference to point to a new commit
+    pub fn update_ref(&self, refname: &str, oid: &str) -> Result<()> {
+        let object_id = ObjectId::from_hex(oid.as_bytes())?;
+        let repo = self.repo.lock().unwrap();
+        repo.reference(
+            refname,
+            object_id,
+            gix::refs::transaction::PreviousValue::Any,
+            "update ref",
+        )?;
+        Ok(())
+    }
+
+    /// Get the OID of a reference
+    pub fn get_ref(&self, refname: &str) -> Result<Option<String>> {
+        let repo = self.repo.lock().unwrap();
+        match repo.find_reference(refname) {
+            Ok(reference) => {
+                let oid = reference.id().to_string();
+                Ok(Some(oid))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+/// Entry for building a Git tree
+pub struct TreeEntry {
+    pub name: String,
+    pub oid: String,
+    pub is_dir: bool,
+    pub executable: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_test_repo() -> (TempDir, GitRepo) {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+
+        // Initialize a new git repo
+        std::process::Command::new("git")
+            .args(&["init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Configure user
+        std::process::Command::new("git")
+            .args(&["config", "user.name", "Test User"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        std::process::Command::new("git")
+            .args(&["config", "user.email", "test@example.com"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Create initial commit
+        fs::write(repo_path.join("README.md"), "# Test").unwrap();
+        std::process::Command::new("git")
+            .args(&["add", "README.md"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        std::process::Command::new("git")
+            .args(&["commit", "-m", "Initial commit"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        let git_repo = GitRepo::open(repo_path).unwrap();
+        (temp_dir, git_repo)
+    }
+
+    #[test]
+    fn test_open_repo() {
+        let (_temp_dir, repo) = setup_test_repo();
+        let commit = repo.head_commit().unwrap();
+        assert!(commit.message().unwrap().contains("Initial commit"));
+    }
+
+    #[test]
+    fn test_read_write_blob() {
+        let (_temp_dir, repo) = setup_test_repo();
+
+        let data = b"Hello, VibeFS!";
+        let oid = repo.write_blob(data).unwrap();
+
+        let retrieved = repo.read_blob(&oid).unwrap();
+        assert_eq!(retrieved, data);
+    }
+
+    #[test]
+    fn test_walk_tree() {
+        let (_temp_dir, repo) = setup_test_repo();
+
+        let tree = repo.head_tree().unwrap();
+        let entries = repo.walk_tree(&tree).unwrap();
+
+        assert!(entries.iter().any(|(path, _, _)| path.to_str().unwrap() == "README.md"));
+    }
+}
