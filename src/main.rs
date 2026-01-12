@@ -50,6 +50,13 @@ enum Commands {
         vibe_id: String,
     },
 
+    /// Get the mount path for a vibe session
+    Path {
+        /// Vibe ID
+        #[arg(default_value = "default")]
+        session: String,
+    },
+
     /// Launch the TUI dashboard
     Dashboard,
 
@@ -123,6 +130,24 @@ async fn main() -> Result<()> {
         }
         Commands::Commit { vibe_id } => {
             commands::commit::commit(&repo_path, &vibe_id).await?;
+        }
+        Commands::Path { session } => {
+            // Ensure daemon is running and session exists
+            daemon_client::ensure_daemon_running(&repo_path).await?;
+            let mut client = DaemonClient::connect(&repo_path).await?;
+            
+            // Export session (ensure mounted)
+            match client.export_session(&session).await? {
+                DaemonResponse::SessionExported { mount_point, .. } => {
+                    println!("{}", mount_point);
+                }
+                DaemonResponse::Error { message } => {
+                    anyhow::bail!("Daemon error: {}", message);
+                }
+                _ => {
+                    anyhow::bail!("Unexpected daemon response");
+                }
+            }
         }
         Commands::Dashboard => {
             tui::run_dashboard(&repo_path).await?;
