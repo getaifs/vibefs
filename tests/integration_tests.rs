@@ -71,7 +71,7 @@ async fn test_full_workflow() -> Result<()> {
     }
 
     // Test 2: Spawn a vibe workspace
-    spawn::spawn(repo_path, "agent-1").await?;
+    spawn::spawn_local(repo_path, "agent-1").await?;
 
     let session_dir = repo_path.join(".vibe/sessions/agent-1");
     assert!(session_dir.exists());
@@ -135,9 +135,9 @@ async fn test_multiple_parallel_vibes() -> Result<()> {
     init::init(repo_path).await?;
 
     // Spawn multiple vibes
-    spawn::spawn(repo_path, "agent-1").await?;
-    spawn::spawn(repo_path, "agent-2").await?;
-    spawn::spawn(repo_path, "agent-3").await?;
+    spawn::spawn_local(repo_path, "agent-1").await?;
+    spawn::spawn_local(repo_path, "agent-2").await?;
+    spawn::spawn_local(repo_path, "agent-3").await?;
 
     // Verify all sessions exist
     assert!(repo_path.join(".vibe/sessions/agent-1").exists());
@@ -188,7 +188,7 @@ async fn test_snapshot_preserves_state() -> Result<()> {
 
     // Initialize and spawn
     init::init(repo_path).await?;
-    spawn::spawn(repo_path, "agent-1").await?;
+    spawn::spawn_local(repo_path, "agent-1").await?;
 
     let session_dir = repo_path.join(".vibe/sessions/agent-1");
 
@@ -232,7 +232,7 @@ async fn test_promote_without_changes() -> Result<()> {
 
     // Initialize and spawn
     init::init(repo_path).await?;
-    spawn::spawn(repo_path, "agent-1").await?;
+    spawn::spawn_local(repo_path, "agent-1").await?;
 
     // Try to promote without any changes
     promote::promote(repo_path, "agent-1").await?;
@@ -255,7 +255,7 @@ async fn test_error_commit_without_promote() -> Result<()> {
 
     // Initialize and spawn
     init::init(repo_path).await?;
-    spawn::spawn(repo_path, "agent-1").await?;
+    spawn::spawn_local(repo_path, "agent-1").await?;
 
     // Try to commit without promoting
     let result = commit::commit(repo_path, "agent-1").await;

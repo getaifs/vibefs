@@ -189,9 +189,9 @@ mod tests {
         let temp_dir = setup_test_repo();
         let repo_path = temp_dir.path();
 
-        // Initialize and spawn
+        // Initialize and spawn (use spawn_local for tests)
         init::init(repo_path).await.unwrap();
-        spawn::spawn(repo_path, "test-vibe").await.unwrap();
+        spawn::spawn_local(repo_path, "test-vibe").await.unwrap();
 
         // Modify a file in the session
         let session_dir = repo_path.join(".vibe/sessions/test-vibe");
