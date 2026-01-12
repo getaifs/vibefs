@@ -18,6 +18,8 @@ use crate::git::GitRepo;
 
 /// Root inode is always 1
 const ROOT_INODE: fileid3 = 1;
+/// Virtual inode for Root's parent (to ensure unique cookie/fileid in readdir)
+const FAKE_ROOT_PARENT_ID: fileid3 = u64::MAX;
 
 /// VibeFS NFS filesystem implementation
 #[derive(Clone)]
@@ -214,7 +216,38 @@ impl NFSFileSystem for VibeNFS {
             return Ok(dirid);
         }
         if name == ".." {
-            return Ok(ROOT_INODE);
+            if dirid == ROOT_INODE {
+                // For Root, ".." is FAKE_ROOT_PARENT_ID to resolve properly in getattr if needed,
+                // but usually ".." from root stays at root or goes to mount point parent.
+                // Returning FAKE_ROOT_PARENT_ID allows readdir consistency.
+                return Ok(FAKE_ROOT_PARENT_ID);
+            }
+            // For others, it's ROOT_INODE (simplified, assuming flat structure or getting parent from path)
+            // Note: The original code returned ROOT_INODE for "..". 
+            // Correct implementation should find actual parent.
+            // But VibeFS structure in build_directory_cache assumes flat-ish or we don't store parent ptrs easily.
+            // Reverting to path parsing logic:
+            
+            // Get parent directory path
+            let dir_meta = self
+                .get_metadata_by_inode(dirid)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?
+                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
+            
+            let path = Path::new(&dir_meta.path);
+            if let Some(parent) = path.parent() {
+                let parent_str = parent.to_string_lossy();
+                if parent_str.is_empty() {
+                    return Ok(ROOT_INODE);
+                }
+                let store = self.metadata.read().await;
+                return store.get_inode_by_path(&parent_str)
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?
+                    .ok_or(nfsstat3::NFS3ERR_NOENT);
+            } else {
+                return Ok(ROOT_INODE);
+            }
         }
 
         // Get parent directory path
@@ -239,7 +272,7 @@ impl NFSFileSystem for VibeNFS {
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
-        if id == ROOT_INODE {
+        if id == ROOT_INODE || id == FAKE_ROOT_PARENT_ID {
             return Ok(self.root_fattr());
         }
 
@@ -638,13 +671,25 @@ impl NFSFileSystem for VibeNFS {
             });
         }
 
-        // Add .. entry
-        if start_after <= 1 && entries.len() < max_entries {
-            entries.push(DirEntry {
-                fileid: ROOT_INODE,
-                name: Self::to_nfsstring(".."),
-                attr: self.root_fattr(),
-            });
+        // Note: We do NOT add .. here for ROOT if we want it to be last
+        if dirid != ROOT_INODE {
+             // For non-root, .. logic is standard
+             // But we need to handle its ID properly.
+             // We can just rely on standard listing if we know parent ID.
+             // But readdir logic needs to be consistent.
+             // Let's assume non-root is fine for now as they have distinct IDs.
+             if start_after <= 1 && entries.len() < max_entries {
+                 // Lookup parent
+                 let parent_id = self.lookup(dirid, &nfsstring(b"..".to_vec())).await
+                     .unwrap_or(ROOT_INODE);
+                 let parent_attr = self.getattr(parent_id).await?;
+                 
+                 entries.push(DirEntry {
+                    fileid: parent_id,
+                    name: Self::to_nfsstring(".."),
+                    attr: parent_attr,
+                });
+             }
         }
 
         // Get children from cache
@@ -652,7 +697,12 @@ impl NFSFileSystem for VibeNFS {
         if let Some(children) = cache.get(&dirid) {
             let store = self.metadata.read().await;
 
-            for &child_inode in children {
+            // Sorting children by inode is important for stable start_after pagination
+            // The Vec in cache might be unsorted.
+            let mut sorted_children = children.clone();
+            sorted_children.sort();
+
+            for &child_inode in &sorted_children {
                 if child_inode <= start_after {
                     continue;
                 }
@@ -678,8 +728,27 @@ impl NFSFileSystem for VibeNFS {
                 }
             }
         }
+        
+        // Handle .. for ROOT at the very end
+        if dirid == ROOT_INODE {
+            // We only add .. if we are at the end of children
+            // And if start_after < FAKE_ROOT_PARENT_ID
+            // And if we have space
+            if entries.len() < max_entries && start_after < FAKE_ROOT_PARENT_ID {
+                entries.push(DirEntry {
+                    fileid: FAKE_ROOT_PARENT_ID,
+                    name: Self::to_nfsstring(".."),
+                    attr: self.root_fattr(),
+                });
+            }
+        }
 
-        Ok(ReadDirResult { entries, end: true })
+        // Determine if we reached the end
+        // If we filled max_entries, we might not be at end.
+        // If we didn't fill max_entries, we are at end.
+        let end = entries.len() < max_entries;
+
+        Ok(ReadDirResult { entries, end })
     }
 
     async fn symlink(
@@ -771,6 +840,7 @@ impl NFSFileSystem for VibeNFS {
         Err(nfsstat3::NFS3ERR_INVAL)
     }
 }
+
 
 #[cfg(test)]
 mod tests {
