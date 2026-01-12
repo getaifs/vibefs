@@ -101,3 +101,72 @@ This is a greenfield project implementing a novel filesystem abstraction. When d
 4. RocksDB metadata is the performance-critical path—design schema carefully for fast inode lookups during NFS operations.
 
 5. Reflink/CoW snapshot support is OS-dependent—abstract this behind a platform-specific trait for macOS (APFS) vs Linux (Btrfs/XFS).
+
+
+
+## VibeFS Workflow
+
+This repository uses VibeFS for managing parallel AI agent workflows on Git.
+
+### Core Workflow
+
+When working on features, follow this workflow:
+
+1. **Initialize** (first time only):
+   ```bash
+   vibe init
+   ```
+
+2. **Spawn your workspace**:
+   ```bash
+   vibe spawn <agent-id>
+   ```
+   Creates an isolated session at `.vibe/sessions/<agent-id>/`
+
+3. **Make changes**:
+   - Modify files in `.vibe/sessions/<agent-id>/`
+   - Create new files as needed
+   - Work as if it's the main repository
+
+4. **Mark files as dirty** (for tracking):
+   ```bash
+   mark_dirty . <file1> <file2> ...
+   ```
+
+5. **Promote to Git commit**:
+   ```bash
+   vibe promote <agent-id>
+   ```
+   Creates a commit at `refs/vibes/<agent-id>` with your changes
+
+6. **Finalize to main** (when ready):
+   ```bash
+   vibe commit <agent-id>
+   ```
+   Moves HEAD to your commit and cleans up the session
+
+### Key Concepts
+
+- **Sessions**: Isolated workspaces in `.vibe/sessions/<agent-id>/`
+- **Zero-cost snapshots**: `vibe snapshot` creates instant backups
+- **Git integration**: All changes flow through proper Git commits
+- **Parallel work**: Multiple agents can work simultaneously in separate sessions
+
+### Example Session
+
+```bash
+# Start working on a feature
+vibe spawn feature-auth
+
+# Make changes
+echo "impl auth" > .vibe/sessions/feature-auth/auth.rs
+mark_dirty . auth.rs
+
+# Promote and commit
+vibe promote feature-auth
+vibe commit feature-auth
+
+# Your changes are now in main!
+```
+
+For more details, see the VibeFS documentation in the repository.
