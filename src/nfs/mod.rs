@@ -206,6 +206,18 @@ impl VibeNFS {
     fn to_nfsstring(s: &str) -> nfsstring {
         nfsstring(s.as_bytes().to_vec())
     }
+
+    /// Check if a path should be ignored for dirty tracking (e.g., macOS metadata files)
+    fn is_ignored_path(path: &str) -> bool {
+        let p = Path::new(path);
+        if let Some(filename) = p.file_name().and_then(|s| s.to_str()) {
+            // Ignore macOS metadata files (AppleDouble) and .DS_Store
+            if filename.starts_with("._") || filename == ".DS_Store" {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[async_trait::async_trait]
@@ -397,11 +409,13 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
         // Mark as dirty
-        let store = self.metadata.write().await;
-        store
-            .mark_dirty(&metadata.path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        drop(store);
+        if !Self::is_ignored_path(&metadata.path) {
+            let store = self.metadata.write().await;
+            store
+                .mark_dirty(&metadata.path)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            drop(store);
+        }
 
         // Update size
         let new_size = existing.len() as u64;
@@ -424,7 +438,6 @@ impl NFSFileSystem for VibeNFS {
         _attr: sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let name = String::from_utf8_lossy(&filename.0).to_string();
-        eprintln!("create dirid={} name={}", dirid, name);
 
         let full_path = if dirid == ROOT_INODE {
             PathBuf::from(&name)
@@ -455,9 +468,11 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
         // Mark as dirty since it's a new file
-        store
-            .mark_dirty(&metadata.path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        if !Self::is_ignored_path(&metadata.path) {
+            store
+                .mark_dirty(&metadata.path)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        }
         drop(store);
 
         // Update directory cache
@@ -475,7 +490,6 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
         let fattr = self.metadata_to_fattr(new_inode, &metadata);
-        eprintln!("  created inode={}", new_inode);
         Ok((new_inode, fattr))
     }
 
@@ -494,7 +508,6 @@ impl NFSFileSystem for VibeNFS {
         dirname: &filename3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let name = String::from_utf8_lossy(&dirname.0).to_string();
-        eprintln!("mkdir dirid={} name={}", dirid, name);
 
         let full_path = if dirid == ROOT_INODE {
             PathBuf::from(&name)
@@ -535,7 +548,6 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
         let fattr = self.metadata_to_fattr(new_inode, &metadata);
-        eprintln!("  mkdir created inode={}", new_inode);
         Ok((new_inode, fattr))
     }
 

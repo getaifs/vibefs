@@ -9,7 +9,7 @@ CACHE_DIR="${HOME}/Library/Caches/vibe"
 MOUNT_DIR="${CACHE_DIR}/mounts"
 
 echo "==================================="
-echo "  VibeFS v0.2 Installer for macOS"
+echo "  VibeFS Installer for macOS"
 echo "==================================="
 echo ""
 

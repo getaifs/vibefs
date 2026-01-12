@@ -168,9 +168,18 @@ async fn handle_client(
                 } else {
                     // Create new session
                     let session_dir = state_guard.repo_path.join(".vibe/sessions").join(&vibe_id);
+
+                    // Get repo name for mount point
+                    let repo_name = state_guard.repo_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "repo".to_string());
+
+                    // Mount point format: ~/Library/Caches/vibe/mounts/<repo_name>-<vibe_id>
                     let mount_point = PathBuf::from(format!(
-                        "{}/Library/Caches/vibe/mounts/{}",
+                        "{}/Library/Caches/vibe/mounts/{}-{}",
                         std::env::var("HOME").unwrap_or_default(),
+                        repo_name,
                         vibe_id
                     ));
 

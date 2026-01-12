@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::fs;
 use tempfile::TempDir;
-use vibefs::commands::{commit, init, promote, snapshot, spawn};
+use vibefs::commands::{close, init, promote, snapshot, spawn};
 use vibefs::db::MetadataStore;
 use vibefs::git::GitRepo;
 
@@ -111,14 +111,8 @@ async fn test_full_workflow() -> Result<()> {
     let vibe_ref = git.get_ref("refs/vibes/agent-1")?;
     assert!(vibe_ref.is_some());
 
-    // Test 6: Commit the vibe
-    let original_head = git.head_commit()?;
-    commit::commit(repo_path, "agent-1").await?;
-
-    // Verify HEAD was updated
-    let new_head = git.head_commit()?;
-    assert_ne!(original_head, new_head);
-    assert_eq!(new_head, vibe_ref.unwrap());
+    // Test 6: Close the session
+    close::close(repo_path, "agent-1", true, false).await?;
 
     // Verify session was cleaned up
     assert!(!session_dir.exists());
@@ -249,7 +243,7 @@ async fn test_promote_without_changes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_error_commit_without_promote() -> Result<()> {
+async fn test_close_session() -> Result<()> {
     let temp_dir = setup_test_repo();
     let repo_path = temp_dir.path();
 
@@ -257,15 +251,63 @@ async fn test_error_commit_without_promote() -> Result<()> {
     init::init(repo_path).await?;
     spawn::spawn_local(repo_path, "agent-1").await?;
 
-    // Try to commit without promoting
-    let result = commit::commit(repo_path, "agent-1").await;
+    let session_dir = repo_path.join(".vibe/sessions/agent-1");
+    assert!(session_dir.exists());
 
-    // Should fail with appropriate error
+    // Add some files
+    fs::write(session_dir.join("test.txt"), "test content")?;
+
+    // Close the session (force to skip confirmation)
+    close::close(repo_path, "agent-1", true, false).await?;
+
+    // Session should be gone
+    assert!(!session_dir.exists());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_close_nonexistent_session() -> Result<()> {
+    let temp_dir = setup_test_repo();
+    let repo_path = temp_dir.path();
+
+    // Initialize
+    init::init(repo_path).await?;
+
+    // Try to close a session that doesn't exist
+    let result = close::close(repo_path, "nonexistent", true, false).await;
+
+    // Should fail
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("has not been promoted"));
+    assert!(result.unwrap_err().to_string().contains("not found"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_dirty_files() -> Result<()> {
+    let temp_dir = setup_test_repo();
+    let repo_path = temp_dir.path();
+
+    // Initialize and spawn
+    init::init(repo_path).await?;
+    spawn::spawn_local(repo_path, "agent-1").await?;
+
+    let session_dir = repo_path.join(".vibe/sessions/agent-1");
+
+    // Add some files
+    fs::write(session_dir.join("file1.txt"), "content 1")?;
+    fs::write(session_dir.join("file2.txt"), "content 2")?;
+    fs::create_dir_all(session_dir.join("subdir"))?;
+    fs::write(session_dir.join("subdir/file3.txt"), "content 3")?;
+
+    // Get dirty files
+    let dirty_files = close::list_dirty(repo_path, "agent-1").await?;
+
+    assert_eq!(dirty_files.len(), 3);
+    assert!(dirty_files.iter().any(|f| f == "file1.txt"));
+    assert!(dirty_files.iter().any(|f| f == "file2.txt"));
+    assert!(dirty_files.iter().any(|f| f.contains("file3.txt")));
 
     Ok(())
 }

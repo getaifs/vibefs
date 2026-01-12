@@ -44,32 +44,28 @@ enum Commands {
         vibe_id: String,
     },
 
-    /// Finalize a vibe into main history
-    Commit {
-        /// Vibe ID to commit
-        vibe_id: String,
+    /// Close a vibe session (unmount and clean up)
+    Close {
+        /// Vibe ID to close
+        session: String,
+
+        /// Force close without confirmation (even with dirty files)
+        #[arg(short, long)]
+        force: bool,
+
+        /// Only show dirty files, don't close the session
+        #[arg(long)]
+        dirty: bool,
     },
 
-    /// Get the mount path for a vibe session
+    /// Get the mount path for an existing vibe session
     Path {
-        /// Vibe ID
-        #[arg(default_value = "default")]
+        /// Vibe ID (must already exist)
         session: String,
     },
 
     /// Launch the TUI dashboard
     Dashboard,
-
-    /// List files from the virtual filesystem (starts daemon if needed)
-    Ls {
-        /// Optional path to list
-        #[arg(default_value = ".")]
-        path: String,
-
-        /// Vibe ID (default session)
-        #[arg(short, long, default_value = "default")]
-        session: String,
-    },
 
     /// Execute a command in a vibe workspace
     #[command(name = "sh")]
@@ -92,8 +88,12 @@ enum Commands {
     /// Show daemon and session status
     Status,
 
-    /// Clean up all VibeFS data for this repository
+    /// Clean up VibeFS data (all or specific session)
     Purge {
+        /// Specific session to purge (if not specified, purges all)
+        #[arg(short, long)]
+        session: Option<String>,
+
         /// Force purge without confirmation
         #[arg(short, long)]
         force: bool,
@@ -135,18 +135,47 @@ async fn main() -> Result<()> {
         Commands::Promote { vibe_id } => {
             commands::promote::promote(&repo_path, &vibe_id).await?;
         }
-        Commands::Commit { vibe_id } => {
-            commands::commit::commit(&repo_path, &vibe_id).await?;
+        Commands::Close { session, force, dirty } => {
+            commands::close::close(&repo_path, &session, force, dirty).await?;
         }
         Commands::Path { session } => {
-            // Ensure daemon is running and session exists
-            daemon_client::ensure_daemon_running(&repo_path).await?;
+            // Check if session exists - do NOT auto-create
+            let vibe_dir = repo_path.join(".vibe");
+            let session_dir = vibe_dir.join("sessions").join(&session);
+
+            if !session_dir.exists() {
+                anyhow::bail!(
+                    "Session '{}' does not exist. Use 'vibe spawn {}' to create it.",
+                    session,
+                    session
+                );
+            }
+
+            // Check if daemon is running and session is mounted
+            if !DaemonClient::is_running(&repo_path).await {
+                anyhow::bail!(
+                    "Daemon not running. Session '{}' exists but is not mounted.\n\
+                     Use 'vibe spawn {}' to start the daemon and mount it.",
+                    session,
+                    session
+                );
+            }
+
             let mut client = DaemonClient::connect(&repo_path).await?;
-            
-            // Export session (ensure mounted)
-            match client.export_session(&session).await? {
-                DaemonResponse::SessionExported { mount_point, .. } => {
-                    println!("{}", mount_point);
+
+            // List sessions to find this one
+            match client.list_sessions().await? {
+                DaemonResponse::Sessions { sessions } => {
+                    if let Some(sess) = sessions.iter().find(|s| s.vibe_id == session) {
+                        println!("{}", sess.mount_point);
+                    } else {
+                        anyhow::bail!(
+                            "Session '{}' exists but is not mounted.\n\
+                             Use 'vibe spawn {}' to mount it.",
+                            session,
+                            session
+                        );
+                    }
                 }
                 DaemonResponse::Error { message } => {
                     anyhow::bail!("Daemon error: {}", message);
@@ -158,32 +187,6 @@ async fn main() -> Result<()> {
         }
         Commands::Dashboard => {
             tui::run_dashboard(&repo_path).await?;
-        }
-        Commands::Ls { path, session: _ } => {
-            // Ensure daemon is running
-            daemon_client::ensure_daemon_running(&repo_path).await?;
-
-            // For now, just list files from Git HEAD
-            // In full implementation, this would use the NFS mount
-            let vibe_dir = repo_path.join(".vibe");
-            if !vibe_dir.exists() {
-                anyhow::bail!("VibeFS not initialized. Run 'vibe init' first.");
-            }
-
-            // Use git ls-tree for now
-            let output = std::process::Command::new("git")
-                .args(["ls-tree", "--name-only", "HEAD", &path])
-                .current_dir(&repo_path)
-                .output()?;
-
-            if output.status.success() {
-                print!("{}", String::from_utf8_lossy(&output.stdout));
-            } else {
-                anyhow::bail!(
-                    "Failed to list files: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
         }
         Commands::Shell { session, command } => {
             // Ensure daemon is running and session exists
@@ -270,9 +273,8 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            println!("VibeFS Status");
-            println!("=============");
-            println!("Repository: {}", repo_path.display());
+            println!("VibeFS Status for: {}", repo_path.display());
+            println!("================================================================================");
 
             // Check daemon status
             if DaemonClient::is_running(&repo_path).await {
@@ -284,53 +286,70 @@ async fn main() -> Result<()> {
                         uptime_secs,
                         ..
                     } => {
-                        println!("\nDaemon: Running");
-                        println!("  NFS Port: {}", nfs_port);
-                        println!("  Uptime: {}s", uptime_secs);
-                        println!("  Active Sessions: {}", session_count);
+                        println!("DAEMON: RUNNING (PID: {})", std::fs::read_to_string(vibefs::daemon_ipc::get_pid_path(&repo_path)).unwrap_or_default().trim());
+                        println!("  Uptime:       {}s", uptime_secs);
+                        println!("  Global Port:  {}", nfs_port);
+                        println!("  Sessions:     {}", session_count);
 
                         // List sessions
                         if let Ok(DaemonResponse::Sessions { sessions }) =
                             client.list_sessions().await
                         {
                             if !sessions.is_empty() {
-                                println!("\nSessions:");
+                                println!("\nACTIVE SESSIONS:");
+                                println!("  {:<20} {:<10} {:<10} {:<40}", "ID", "PORT", "UPTIME", "MOUNT POINT");
+                                println!("  {:-<20} {:-<10} {:-<10} {:-<40}", "", "", "", "");
                                 for session in sessions {
                                     println!(
-                                        "  - {} (port: {}, uptime: {}s)",
-                                        session.vibe_id, session.nfs_port, session.uptime_secs
+                                        "  {:<20} {:<10} {:<10} {:<40}",
+                                        session.vibe_id,
+                                        session.nfs_port,
+                                        format!("{}s", session.uptime_secs),
+                                        session.mount_point
                                     );
-                                    println!("    Mount: {}", session.mount_point);
                                 }
                             }
                         }
                     }
                     _ => {
-                        println!("\nDaemon: Unknown status");
+                        println!("DAEMON: Unknown status");
                     }
                 }
             } else {
-                println!("\nDaemon: Not running");
+                println!("DAEMON: NOT RUNNING");
             }
 
             // List session directories
             let sessions_dir = vibe_dir.join("sessions");
             if sessions_dir.exists() {
-                let mut found_sessions = false;
+                let mut local_sessions = Vec::new();
                 for entry in std::fs::read_dir(&sessions_dir)? {
                     let entry = entry?;
                     if entry.file_type()?.is_dir() {
-                        if !found_sessions {
-                            println!("\nLocal Sessions:");
-                            found_sessions = true;
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !name.contains("_snapshot_") {
+                            local_sessions.push(name);
                         }
-                        println!("  - {}", entry.file_name().to_string_lossy());
+                    }
+                }
+
+                if !local_sessions.is_empty() {
+                    println!("\nOFFLINE SESSIONS (in storage):");
+                    for session in local_sessions {
+                        println!("  - {}", session);
                     }
                 }
             }
+            println!("================================================================================");
         }
-        Commands::Purge { force } => {
-            commands::purge::purge(&repo_path, force).await?;
+        Commands::Purge { session, force } => {
+            if let Some(session_id) = session {
+                // Close a specific session
+                commands::close::close(&repo_path, &session_id, force, false).await?;
+            } else {
+                // Purge all
+                commands::purge::purge(&repo_path, force).await?;
+            }
         }
     }
 

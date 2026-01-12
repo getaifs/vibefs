@@ -68,6 +68,13 @@ pub async fn purge<P: AsRef<Path>>(repo_path: P, force: bool) -> Result<()> {
     // This is best-effort. The daemon *should* have cleaned up, but we are purging because things are likely broken.
     // We can iterate over sessions dir to find IDs.
     let sessions_dir = vibe_dir.join("sessions");
+
+    // Get repo name for mount point pattern
+    let repo_name = repo_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".to_string());
+
     if sessions_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
             for entry in entries.flatten() {
@@ -75,52 +82,64 @@ pub async fn purge<P: AsRef<Path>>(repo_path: P, force: bool) -> Result<()> {
                     if file_type.is_dir() {
                         let vibe_id = entry.file_name();
                         let vibe_id_str = vibe_id.to_string_lossy();
-                        
-                        let mount_point = PathBuf::from(format!(
-                            "{}/Library/Caches/vibe/mounts/{}",
-                            std::env::var("HOME").unwrap_or_default(),
-                            vibe_id_str
-                        ));
 
-                        if mount_point.exists() {
-                            println!("  Unmounting {}...", mount_point.display());
-                            
-                            #[cfg(target_os = "macos")]
-                            {
-                                // Try diskutil unmount force first (usually better for stuck mounts)
-                                let _ = tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    tokio::process::Command::new("diskutil")
-                                        .args(["unmount", "force"])
-                                        .arg(&mount_point)
-                                        .output()
-                                ).await;
+                        // Try both old format (just vibe_id) and new format (repo_name-vibe_id)
+                        let mount_points = vec![
+                            PathBuf::from(format!(
+                                "{}/Library/Caches/vibe/mounts/{}-{}",
+                                std::env::var("HOME").unwrap_or_default(),
+                                repo_name,
+                                vibe_id_str
+                            )),
+                            // Legacy format for backwards compatibility
+                            PathBuf::from(format!(
+                                "{}/Library/Caches/vibe/mounts/{}",
+                                std::env::var("HOME").unwrap_or_default(),
+                                vibe_id_str
+                            )),
+                        ];
 
-                                // Fallback to umount -f
-                                let _ = tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    tokio::process::Command::new("umount")
-                                        .arg("-f")
-                                        .arg(&mount_point)
-                                        .output()
-                                ).await;
-                            }
-                            
-                            #[cfg(target_os = "linux")]
-                            {
-                                let _ = tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    tokio::process::Command::new("umount")
-                                        .arg("-l") // Lazy unmount
-                                        .arg(&mount_point)
-                                        .output()
-                                ).await;
-                            }
+                        for mount_point in mount_points {
+                            if mount_point.exists() {
+                                println!("  Unmounting {}...", mount_point.display());
 
-                            // Try removing the mount point directory
-                            if let Err(e) = std::fs::remove_dir(&mount_point) {
-                                // If it fails (e.g. still mounted), we just warn
-                                println!("  Warning: Failed to remove mount point: {}", e);
+                                #[cfg(target_os = "macos")]
+                                {
+                                    // Try diskutil unmount force first (usually better for stuck mounts)
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        tokio::process::Command::new("diskutil")
+                                            .args(["unmount", "force"])
+                                            .arg(&mount_point)
+                                            .output()
+                                    ).await;
+
+                                    // Fallback to umount -f
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        tokio::process::Command::new("umount")
+                                            .arg("-f")
+                                            .arg(&mount_point)
+                                            .output()
+                                    ).await;
+                                }
+
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        tokio::process::Command::new("umount")
+                                            .arg("-l") // Lazy unmount
+                                            .arg(&mount_point)
+                                            .output()
+                                    ).await;
+                                }
+
+                                // Try removing the mount point directory
+                                if let Err(e) = std::fs::remove_dir(&mount_point) {
+                                    // If it fails (e.g. still mounted), we just warn
+                                    println!("  Warning: Failed to remove mount point: {}", e);
+                                }
                             }
                         }
                     }

@@ -1,4 +1,4 @@
-[ ] RPC is bad when actually read the file containt on the NFS mount point
+[X] RPC is bad when actually read the file containt on the NFS mount point
 
 ╭─x on Erics-MacBook-Pro in getaifs.com on  master [?14]
 ╰─➜ vibe spawn test-v3
