@@ -84,12 +84,21 @@ pub async fn purge<P: AsRef<Path>>(repo_path: P, force: bool) -> Result<()> {
 
                         if mount_point.exists() {
                             println!("  Unmounting {}...", mount_point.display());
-                            // Try umount
+                            // Try force unmount using platform-specific tools
                             #[cfg(target_os = "macos")]
-                            let _ = std::process::Command::new("umount")
-                                .arg("-f") // Force unmount
-                                .arg(&mount_point)
-                                .output();
+                            {
+                                // First try standard umount -f
+                                let _ = std::process::Command::new("umount")
+                                    .arg("-f")
+                                    .arg(&mount_point)
+                                    .output();
+                                
+                                // Then try diskutil unmount force (often works better for stuck NFS)
+                                let _ = std::process::Command::new("diskutil")
+                                    .args(["unmount", "force"])
+                                    .arg(&mount_point)
+                                    .output();
+                            }
                             
                             #[cfg(target_os = "linux")]
                             let _ = std::process::Command::new("umount")
