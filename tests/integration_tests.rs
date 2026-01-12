@@ -65,9 +65,11 @@ async fn test_full_workflow() -> Result<()> {
     assert!(repo_path.join(".vibe/metadata.db").exists());
 
     // Verify metadata was populated
-    let metadata = MetadataStore::open(repo_path.join(".vibe/metadata.db"))?;
-    let root = metadata.get_inode(1)?.unwrap();
-    assert!(root.is_dir);
+    {
+        let metadata = MetadataStore::open(repo_path.join(".vibe/metadata.db"))?;
+        let root = metadata.get_inode(1)?.unwrap();
+        assert!(root.is_dir);
+    }
 
     // Test 2: Spawn a vibe workspace
     spawn::spawn(repo_path, "agent-1").await?;
@@ -80,11 +82,14 @@ async fn test_full_workflow() -> Result<()> {
     fs::write(session_dir.join("README.md"), "# VibeFS Test\n\nUpdated by agent-1").unwrap();
 
     // Mark files as dirty
-    metadata.mark_dirty("new_feature.rs")?;
-    metadata.mark_dirty("README.md")?;
+    {
+        let metadata = MetadataStore::open(repo_path.join(".vibe/metadata.db"))?;
+        metadata.mark_dirty("new_feature.rs")?;
+        metadata.mark_dirty("README.md")?;
 
-    let dirty_paths = metadata.get_dirty_paths()?;
-    assert_eq!(dirty_paths.len(), 2);
+        let dirty_paths = metadata.get_dirty_paths()?;
+        assert_eq!(dirty_paths.len(), 2);
+    } // Drop metadata before snapshot
 
     // Test 4: Create a snapshot
     snapshot::snapshot(repo_path, "agent-1").await?;
@@ -141,25 +146,27 @@ async fn test_multiple_parallel_vibes() -> Result<()> {
     assert!(repo_path.join(".vibe/sessions/agent-3").exists());
 
     // Simulate each agent working on different files
-    let metadata = MetadataStore::open(repo_path.join(".vibe/metadata.db"))?;
+    {
+        let metadata = MetadataStore::open(repo_path.join(".vibe/metadata.db"))?;
 
-    fs::write(
-        repo_path.join(".vibe/sessions/agent-1/feature1.rs"),
-        "// Feature 1",
-    )?;
-    metadata.mark_dirty("feature1.rs")?;
+        fs::write(
+            repo_path.join(".vibe/sessions/agent-1/feature1.rs"),
+            "// Feature 1",
+        )?;
+        metadata.mark_dirty("feature1.rs")?;
 
-    fs::write(
-        repo_path.join(".vibe/sessions/agent-2/feature2.rs"),
-        "// Feature 2",
-    )?;
-    metadata.mark_dirty("feature2.rs")?;
+        fs::write(
+            repo_path.join(".vibe/sessions/agent-2/feature2.rs"),
+            "// Feature 2",
+        )?;
+        metadata.mark_dirty("feature2.rs")?;
 
-    fs::write(
-        repo_path.join(".vibe/sessions/agent-3/feature3.rs"),
-        "// Feature 3",
-    )?;
-    metadata.mark_dirty("feature3.rs")?;
+        fs::write(
+            repo_path.join(".vibe/sessions/agent-3/feature3.rs"),
+            "// Feature 3",
+        )?;
+        metadata.mark_dirty("feature3.rs")?;
+    } // Drop metadata before promoting
 
     // Promote all vibes
     promote::promote(repo_path, "agent-1").await?;

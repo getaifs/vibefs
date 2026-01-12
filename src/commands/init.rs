@@ -54,6 +54,10 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
     };
     metadata.put_inode(1, &root_metadata)?;
 
+    // Initialize the inode counter to start at 2 (since 1 is used for root)
+    // This prevents next_inode_id() from returning 1 and overwriting root
+    let _ = metadata.next_inode_id()?; // This sets the counter to 1 and returns 1, which we discard
+
     // Populate metadata for all entries
     for (path, oid) in entries {
         let inode_id = metadata.next_inode_id()?;
@@ -77,6 +81,9 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
     println!("  Metadata store: {}", metadata_path.display());
     println!("  Sessions dir: {}", sessions_dir.display());
     println!("  Cache dir: {}", cache_dir.display());
+
+    // Explicitly drop metadata to ensure RocksDB flushes
+    drop(metadata);
 
     Ok(())
 }

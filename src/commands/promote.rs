@@ -193,9 +193,11 @@ mod tests {
         fs::write(session_dir.join("new_file.txt"), "new content").unwrap();
 
         // Mark as dirty
-        let metadata_path = repo_path.join(".vibe/metadata.db");
-        let metadata = MetadataStore::open(&metadata_path).unwrap();
-        metadata.mark_dirty("new_file.txt").unwrap();
+        {
+            let metadata_path = repo_path.join(".vibe/metadata.db");
+            let metadata = MetadataStore::open(&metadata_path).unwrap();
+            metadata.mark_dirty("new_file.txt").unwrap();
+        } // metadata is dropped here, releasing the lock
 
         // Promote
         promote(repo_path, "test-vibe").await.unwrap();

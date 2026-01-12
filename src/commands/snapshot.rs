@@ -69,7 +69,7 @@ fn copy_with_clonefile(src: &Path, dst: &Path) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn copy_with_reflink(src: &Path, dst: &Path) -> Result<()> {
-    // Use cp with --reflink=always for CoW copy on Btrfs/XFS
+    // Try cp with --reflink=always for CoW copy on Btrfs/XFS
     let output = Command::new("cp")
         .arg("-r")
         .arg("--reflink=always")
@@ -79,8 +79,9 @@ fn copy_with_reflink(src: &Path, dst: &Path) -> Result<()> {
         .context("Failed to execute cp with reflink")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("cp with reflink failed: {}", stderr);
+        // Reflink not supported, fall back to regular copy
+        eprintln!("Warning: reflink not supported on this filesystem, using regular copy");
+        copy_recursive(src, dst)?;
     }
 
     Ok(())
