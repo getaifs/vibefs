@@ -60,7 +60,7 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
                     println!("⚠ Auto-mount failed: {}", e);
                     println!("\n  To mount manually, run:");
                     println!(
-                        "  mount_nfs -o vers=3,tcp,port={},mountport={},resvport,nolock,locallocks localhost:/ {}",
+                        "  mount_nfs -o vers=3,tcp,port={},mountport={},noresvport,nolock,locallocks localhost:/ {}",
                         nfs_port, nfs_port, mount_point
                     );
                 }
@@ -85,7 +85,7 @@ fn mount_nfs(mount_point: &str, port: u16) -> Result<()> {
     std::fs::create_dir_all(mount_point)?;
 
     // macOS mount_nfs options for user-space mounting
-    // -o resvport: Use reserved ports (allows non-root mount on macOS)
+    // -o noresvport: Use non-reserved ports (allows non-root mount on macOS)
     // -o vers=3: Use NFSv3 (nfsserve is v3)
     // -o tcp: Use TCP transport
     // -o port=<port>: Connect to specified port
@@ -95,7 +95,7 @@ fn mount_nfs(mount_point: &str, port: u16) -> Result<()> {
         .args([
             "-o",
             &format!(
-                "vers=3,tcp,port={},mountport={},resvport,nolock,locallocks,noacl,soft,retrans=2,timeo=5",
+                "vers=3,tcp,port={},mountport={},noresvport,nolock,locallocks,noacl,soft,retrans=2,timeo=5",
                 port, port
             ),
             &format!("localhost:/"),

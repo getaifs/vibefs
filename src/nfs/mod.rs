@@ -414,6 +414,7 @@ impl NFSFileSystem for VibeNFS {
         _attr: sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let name = String::from_utf8_lossy(&filename.0).to_string();
+        eprintln!("create dirid={} name={}", dirid, name);
 
         let full_path = if dirid == ROOT_INODE {
             PathBuf::from(&name)
@@ -464,6 +465,7 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
         let fattr = self.metadata_to_fattr(new_inode, &metadata);
+        eprintln!("  created inode={}", new_inode);
         Ok((new_inode, fattr))
     }
 
@@ -482,6 +484,7 @@ impl NFSFileSystem for VibeNFS {
         dirname: &filename3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let name = String::from_utf8_lossy(&dirname.0).to_string();
+        eprintln!("mkdir dirid={} name={}", dirid, name);
 
         let full_path = if dirid == ROOT_INODE {
             PathBuf::from(&name)
@@ -522,6 +525,7 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
 
         let fattr = self.metadata_to_fattr(new_inode, &metadata);
+        eprintln!("  mkdir created inode={}", new_inode);
         Ok((new_inode, fattr))
     }
 
@@ -655,100 +659,131 @@ impl NFSFileSystem for VibeNFS {
             }
         }
 
-        let mut entries = Vec::new();
+        // 1. Identify IDs for dot and dotdot
+        let dot_id = dirid;
+        let dotdot_id = if dirid == ROOT_INODE {
+            FAKE_ROOT_PARENT_ID
+        } else {
+            // Lookup parent
+            self.lookup(dirid, &nfsstring(b"..".to_vec()))
+                .await
+                .unwrap_or(ROOT_INODE)
+        };
 
-        // Add . entry
+        // 2. Get sorted list of children
+        let cache = self.dir_children.read().await;
+        let mut children = if let Some(c) = cache.get(&dirid) {
+            c.clone()
+        } else {
+            Vec::new()
+        };
+        children.sort(); // Ensure stable order
+        drop(cache);
+
+        // 3. Determine resume point based on start_after cookie
+        // Logical sequence: [dot, dotdot, ...children]
+        let mut emit_dot = false;
+        let mut emit_dotdot = false;
+        let child_idx;
+
         if start_after == 0 {
-            let dot_attr = if dirid == ROOT_INODE {
+            // Start from beginning
+            emit_dot = true;
+            emit_dotdot = true;
+            child_idx = 0;
+        } else if start_after == dot_id {
+            // Passed dot, resume at dotdot
+            emit_dotdot = true;
+            child_idx = 0;
+        } else if start_after == dotdot_id {
+            // Passed dotdot, resume at children start
+            child_idx = 0;
+        } else {
+            // Assume we are inside children list
+            // Find position of start_after
+            match children.binary_search(&start_after) {
+                Ok(idx) => {
+                    // Start after the found child
+                    child_idx = idx + 1;
+                }
+                Err(idx) => {
+                    // Not found exactly (maybe deleted), start at insertion point
+                    // effectively: children[idx] > start_after
+                    child_idx = idx;
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        let store = self.metadata.read().await;
+
+        // Helper to add entry if space permits
+        // Inlined to satisfy borrow checker
+        
+        // Emit entries
+        if emit_dot {
+            let attr = if dirid == ROOT_INODE {
                 self.root_fattr()
             } else {
-                self.getattr(dirid).await?
+                store.get_inode(dirid).ok().flatten().map(|m| self.metadata_to_fattr(dirid, &m)).unwrap_or_else(|| self.root_fattr())
             };
-            entries.push(DirEntry {
-                fileid: dirid,
-                name: Self::to_nfsstring("."),
-                attr: dot_attr,
-            });
-        }
-
-        // Note: We do NOT add .. here for ROOT if we want it to be last
-        if dirid != ROOT_INODE {
-             // For non-root, .. logic is standard
-             // But we need to handle its ID properly.
-             // We can just rely on standard listing if we know parent ID.
-             // But readdir logic needs to be consistent.
-             // Let's assume non-root is fine for now as they have distinct IDs.
-             if start_after <= 1 && entries.len() < max_entries {
-                 // Lookup parent
-                 let parent_id = self.lookup(dirid, &nfsstring(b"..".to_vec())).await
-                     .unwrap_or(ROOT_INODE);
-                 let parent_attr = self.getattr(parent_id).await?;
-                 
-                 entries.push(DirEntry {
-                    fileid: parent_id,
-                    name: Self::to_nfsstring(".."),
-                    attr: parent_attr,
-                });
-             }
-        }
-
-        // Get children from cache
-        let cache = self.dir_children.read().await;
-        if let Some(children) = cache.get(&dirid) {
-            let store = self.metadata.read().await;
-
-            // Sorting children by inode is important for stable start_after pagination
-            // The Vec in cache might be unsorted.
-            let mut sorted_children = children.clone();
-            sorted_children.sort();
-
-            for &child_inode in &sorted_children {
-                if child_inode <= start_after {
-                    continue;
-                }
-                if entries.len() >= max_entries {
-                    return Ok(ReadDirResult {
-                        entries,
-                        end: false,
-                    });
-                }
-
-                if let Ok(Some(child_meta)) = store.get_inode(child_inode) {
-                    // Extract just the filename from the path
-                    let filename = Path::new(&child_meta.path)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
-
-                    entries.push(DirEntry {
-                        fileid: child_inode,
-                        name: Self::to_nfsstring(&filename),
-                        attr: self.metadata_to_fattr(child_inode, &child_meta),
-                    });
-                }
-            }
-        }
-        
-        // Handle .. for ROOT at the very end
-        if dirid == ROOT_INODE {
-            // We only add .. if we are at the end of children
-            // And if start_after < FAKE_ROOT_PARENT_ID
-            // And if we have space
-            if entries.len() < max_entries && start_after < FAKE_ROOT_PARENT_ID {
+            
+            if entries.len() < max_entries {
                 entries.push(DirEntry {
-                    fileid: FAKE_ROOT_PARENT_ID,
+                    fileid: dot_id,
+                    name: Self::to_nfsstring("."),
+                    attr,
+                });
+            } else {
+                return Ok(ReadDirResult { entries, end: false });
+            }
+        }
+
+        if emit_dotdot {
+             let attr = if dotdot_id == FAKE_ROOT_PARENT_ID {
+                self.root_fattr()
+            } else if dotdot_id == ROOT_INODE {
+                self.root_fattr()
+            } else {
+                store.get_inode(dotdot_id).ok().flatten().map(|m| self.metadata_to_fattr(dotdot_id, &m)).unwrap_or_else(|| self.root_fattr())
+            };
+            
+            if entries.len() < max_entries {
+                entries.push(DirEntry {
+                    fileid: dotdot_id,
                     name: Self::to_nfsstring(".."),
-                    attr: self.root_fattr(),
+                    attr,
+                });
+            } else {
+                return Ok(ReadDirResult { entries, end: false });
+            }
+        }
+
+        // Emit children
+        for &child_inode in children.iter().skip(child_idx) {
+            if entries.len() >= max_entries {
+                return Ok(ReadDirResult { entries, end: false });
+            }
+
+            if let Ok(Some(child_meta)) = store.get_inode(child_inode) {
+                 let filename = Path::new(&child_meta.path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                
+                let attr = self.metadata_to_fattr(child_inode, &child_meta);
+                entries.push(DirEntry {
+                    fileid: child_inode,
+                    name: Self::to_nfsstring(&filename),
+                    attr,
                 });
             }
         }
 
-        // Determine if we reached the end
-        // If we filled max_entries, we might not be at end.
-        // If we didn't fill max_entries, we are at end.
-        let end = entries.len() < max_entries;
-
-        Ok(ReadDirResult { entries, end })
+        Ok(ReadDirResult {
+            entries,
+            end: true, // We processed everything we intended to
+        })
     }
 
     async fn symlink(
@@ -901,5 +936,77 @@ mod tests {
         // ftype3 doesn't implement PartialEq, so check mode instead
         assert_eq!(root_attr.mode, 0o755);
         assert_eq!(root_attr.fileid, ROOT_INODE);
+    }
+
+    #[tokio::test]
+    async fn test_readdir_pagination() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("metadata.db");
+        let session_dir = temp_dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::process::Command::new("git").args(["init"]).current_dir(&repo_dir).output().unwrap();
+        
+        let metadata = MetadataStore::open(&db_path).unwrap();
+        let git = GitRepo::open(&repo_dir).unwrap();
+
+        let nfs = VibeNFS::new(
+            Arc::new(RwLock::new(metadata)),
+            Arc::new(RwLock::new(git)),
+            session_dir,
+            "test".to_string(),
+        );
+
+        // Create a directory "subdir" in root
+        let (subdir_id, _) = nfs.mkdir(ROOT_INODE, &VibeNFS::to_nfsstring("subdir")).await.unwrap();
+        
+        // Create 3 files in subdir
+        let _f1 = nfs.create_exclusive(subdir_id, &VibeNFS::to_nfsstring("file1")).await.unwrap();
+        let _f2 = nfs.create_exclusive(subdir_id, &VibeNFS::to_nfsstring("file2")).await.unwrap();
+        let _f3 = nfs.create_exclusive(subdir_id, &VibeNFS::to_nfsstring("file3")).await.unwrap();
+
+        // List subdir with max_entries=1
+        let mut cookie = 0;
+        let mut all_entries = Vec::new();
+        let mut iterations = 0;
+        let max_iterations = 100;
+        
+        loop {
+            iterations += 1;
+            if iterations > max_iterations {
+                panic!("Infinite loop detected in readdir pagination");
+            }
+
+            let result = nfs.readdir(subdir_id, cookie, 1).await.unwrap();
+            
+            for entry in &result.entries {
+                cookie = entry.fileid;
+                all_entries.push(String::from_utf8_lossy(&entry.name.0).to_string());
+            }
+            
+            if result.entries.is_empty() || (result.entries.len() < 1) { // len < max_entries implies end
+                break;
+            }
+            // If result.end is true, we stop. 
+            // Note: our impl sets end=false if we returned max_entries
+            if result.end {
+                break;
+            }
+        }
+        
+        // Expect: ".", "..", "file1", "file2", "file3"
+        assert!(all_entries.contains(&".".to_string()));
+        assert!(all_entries.contains(&"..".to_string()));
+        assert!(all_entries.contains(&"file1".to_string()));
+        assert!(all_entries.contains(&"file2".to_string()));
+        assert!(all_entries.contains(&"file3".to_string()));
+        assert_eq!(all_entries.len(), 5);
+        
+        // Verify uniqueness
+        let mut sorted = all_entries.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5);
     }
 }
