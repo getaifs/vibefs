@@ -84,30 +84,44 @@ pub async fn purge<P: AsRef<Path>>(repo_path: P, force: bool) -> Result<()> {
 
                         if mount_point.exists() {
                             println!("  Unmounting {}...", mount_point.display());
-                            // Try force unmount using platform-specific tools
+                            
                             #[cfg(target_os = "macos")]
                             {
-                                // First try standard umount -f
-                                let _ = std::process::Command::new("umount")
-                                    .arg("-f")
-                                    .arg(&mount_point)
-                                    .output();
-                                
-                                // Then try diskutil unmount force (often works better for stuck NFS)
-                                let _ = std::process::Command::new("diskutil")
-                                    .args(["unmount", "force"])
-                                    .arg(&mount_point)
-                                    .output();
+                                // Try diskutil unmount force first (usually better for stuck mounts)
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    tokio::process::Command::new("diskutil")
+                                        .args(["unmount", "force"])
+                                        .arg(&mount_point)
+                                        .output()
+                                ).await;
+
+                                // Fallback to umount -f
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    tokio::process::Command::new("umount")
+                                        .arg("-f")
+                                        .arg(&mount_point)
+                                        .output()
+                                ).await;
                             }
                             
                             #[cfg(target_os = "linux")]
-                            let _ = std::process::Command::new("umount")
-                                .arg("-l") // Lazy unmount
-                                .arg(&mount_point)
-                                .output();
+                            {
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    tokio::process::Command::new("umount")
+                                        .arg("-l") // Lazy unmount
+                                        .arg(&mount_point)
+                                        .output()
+                                ).await;
+                            }
 
                             // Try removing the mount point directory
-                            let _ = std::fs::remove_dir(&mount_point);
+                            if let Err(e) = std::fs::remove_dir(&mount_point) {
+                                // If it fails (e.g. still mounted), we just warn
+                                println!("  Warning: Failed to remove mount point: {}", e);
+                            }
                         }
                     }
                 }
