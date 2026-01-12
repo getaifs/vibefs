@@ -5,10 +5,15 @@ use tokio::sync::RwLock;
 
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
+use crate::cwd_validation;
 // use crate::nfs::VibeNFS;
 
 /// Spawn a new vibe workspace
 pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
+    // Validate that we're running from the correct directory
+    let _validated_root = cwd_validation::validate_cwd()
+        .context("Cannot spawn vibe workspace")?;
+
     let repo_path = repo_path.as_ref();
     let vibe_dir = repo_path.join(".vibe");
 

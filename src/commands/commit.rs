@@ -2,9 +2,14 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::git::GitRepo;
+use crate::cwd_validation;
 
 /// Finalize a vibe into main history
 pub async fn commit<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
+    // Validate that we're running from the correct directory
+    let _validated_root = cwd_validation::validate_cwd()
+        .context("Cannot commit vibe session")?;
+
     let repo_path = repo_path.as_ref();
     let vibe_dir = repo_path.join(".vibe");
     let session_dir = vibe_dir.join("sessions").join(vibe_id);

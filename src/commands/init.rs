@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::db::{InodeMetadata, MetadataStore};
 use crate::git::GitRepo;
+use crate::cwd_validation;
 
 const VIBEFS_WORKFLOW_DOCS: &str = r#"
 ## VibeFS Workflow
@@ -75,6 +76,10 @@ For more details, see the VibeFS documentation in the repository.
 
 /// Initialize VibeFS for a Git repository
 pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
+    // Validate that we're running from the correct directory
+    let validated_root = cwd_validation::validate_cwd()
+        .context("Cannot initialize VibeFS")?;
+
     let repo_path = repo_path.as_ref();
 
     println!("Initializing VibeFS for repository at: {}", repo_path.display());
