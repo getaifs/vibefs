@@ -19,7 +19,7 @@ use crate::git::GitRepo;
 /// Root inode is always 1
 const ROOT_INODE: fileid3 = 1;
 /// Virtual inode for Root's parent (to ensure unique cookie/fileid in readdir)
-const FAKE_ROOT_PARENT_ID: fileid3 = u64::MAX;
+const FAKE_ROOT_PARENT_ID: fileid3 = 2;
 
 /// VibeFS NFS filesystem implementation
 #[derive(Clone)]
@@ -48,6 +48,16 @@ impl VibeNFS {
             dir_children: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+    // ... (omitting build_directory_cache and helpers for brevity if not changing)
+
+    // (Actually I need to match exact context to replace safely. 
+    // Since I cannot match everything easily, I will replace constants first, then readdir.)
+    
+    // WAIT. `replace` tool requires EXACT match. 
+    // I will do 2 replaces.
+    // 1. Change FAKE_ROOT_PARENT_ID.
+    // 2. Change readdir.
+
 
     /// Initialize the directory children cache from metadata store
     pub async fn build_directory_cache(&self) -> Result<()> {
@@ -144,7 +154,7 @@ impl VibeNFS {
     }
 
     /// Create the root directory fattr
-    fn root_fattr(&self) -> fattr3 {
+    fn root_fattr(&self, fileid: fileid3) -> fattr3 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
@@ -162,7 +172,7 @@ impl VibeNFS {
                 specdata2: 0,
             },
             fsid: 1,
-            fileid: ROOT_INODE,
+            fileid,
             atime: nfstime3 {
                 seconds: now.as_secs() as u32,
                 nseconds: 0,
@@ -273,7 +283,7 @@ impl NFSFileSystem for VibeNFS {
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
         if id == ROOT_INODE || id == FAKE_ROOT_PARENT_ID {
-            return Ok(self.root_fattr());
+            return Ok(self.root_fattr(id));
         }
 
         let metadata = self
@@ -717,15 +727,12 @@ impl NFSFileSystem for VibeNFS {
         let mut entries = Vec::new();
         let store = self.metadata.read().await;
 
-        // Helper to add entry if space permits
-        // Inlined to satisfy borrow checker
-        
         // Emit entries
         if emit_dot {
             let attr = if dirid == ROOT_INODE {
-                self.root_fattr()
+                self.root_fattr(dirid)
             } else {
-                store.get_inode(dirid).ok().flatten().map(|m| self.metadata_to_fattr(dirid, &m)).unwrap_or_else(|| self.root_fattr())
+                store.get_inode(dirid).ok().flatten().map(|m| self.metadata_to_fattr(dirid, &m)).unwrap_or_else(|| self.root_fattr(dirid))
             };
             
             if entries.len() < max_entries {
@@ -741,11 +748,11 @@ impl NFSFileSystem for VibeNFS {
 
         if emit_dotdot {
              let attr = if dotdot_id == FAKE_ROOT_PARENT_ID {
-                self.root_fattr()
+                self.root_fattr(dotdot_id)
             } else if dotdot_id == ROOT_INODE {
-                self.root_fattr()
+                self.root_fattr(dotdot_id)
             } else {
-                store.get_inode(dotdot_id).ok().flatten().map(|m| self.metadata_to_fattr(dotdot_id, &m)).unwrap_or_else(|| self.root_fattr())
+                store.get_inode(dotdot_id).ok().flatten().map(|m| self.metadata_to_fattr(dotdot_id, &m)).unwrap_or_else(|| self.root_fattr(dotdot_id))
             };
             
             if entries.len() < max_entries {
@@ -761,6 +768,11 @@ impl NFSFileSystem for VibeNFS {
 
         // Emit children
         for &child_inode in children.iter().skip(child_idx) {
+            // Skip if child is same as directory (handle . separately)
+            if child_inode == dirid {
+                continue;
+            }
+
             if entries.len() >= max_entries {
                 return Ok(ReadDirResult { entries, end: false });
             }

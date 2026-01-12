@@ -106,7 +106,7 @@ impl MetadataStore {
                 let current = u64::from_le_bytes(bytes.try_into().unwrap());
                 current + 1
             }
-            None => 2, // Start from 2, as 1 is reserved for Root
+            None => 100, // Start from 100 to avoid collisions with reserved IDs
         };
 
         self.db.put(key, next_id.to_le_bytes())?;
