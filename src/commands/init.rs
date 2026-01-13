@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::db::{InodeMetadata, MetadataStore};
@@ -116,7 +117,25 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
     let entries = git.list_tree_files()
         .context("Failed to list tree files")?;
 
-    println!("Found {} entries", entries.len());
+    println!("Found {} file entries", entries.len());
+
+    // Extract all unique directory paths from file paths
+    // Git only stores files (blobs), so we need to create directory inodes
+    // for all parent directories
+    let mut directories: BTreeSet<String> = BTreeSet::new();
+    for (path, _) in &entries {
+        let mut current = path.as_path();
+        while let Some(parent) = current.parent() {
+            let parent_str = parent.to_string_lossy().to_string();
+            if parent_str.is_empty() {
+                break;
+            }
+            directories.insert(parent_str);
+            current = parent;
+        }
+    }
+
+    println!("Found {} directories", directories.len());
 
     // Create root inode
     let root_metadata = InodeMetadata {
@@ -132,7 +151,22 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
     // This prevents next_inode_id() from returning 1 and overwriting root
     let _ = metadata.next_inode_id()?; // This sets the counter to 1 and returns 1, which we discard
 
-    // Populate metadata for all entries
+    // Create directory inodes first (so parent lookups work during cache building)
+    for dir_path in &directories {
+        let inode_id = metadata.next_inode_id()?;
+
+        let dir_metadata = InodeMetadata {
+            path: dir_path.clone(),
+            git_oid: None,  // Directories don't have a git oid
+            is_dir: true,
+            size: 0,
+            volatile: false,
+        };
+
+        metadata.put_inode(inode_id, &dir_metadata)?;
+    }
+
+    // Populate metadata for all file entries
     for (path, oid) in entries {
         let inode_id = metadata.next_inode_id()?;
 
@@ -143,7 +177,7 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
         let inode_metadata = InodeMetadata {
             path: path.to_string_lossy().to_string(),
             git_oid: Some(oid),
-            is_dir: false,  // All entries from ls-tree -r are files
+            is_dir: false,
             size,
             volatile: false,
         };
