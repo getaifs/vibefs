@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::daemon_ipc::{get_socket_path, DaemonRequest, DaemonResponse};
+use crate::VERSION;
 
 /// Client for communicating with the vibed daemon
 pub struct DaemonClient {
@@ -29,6 +30,31 @@ impl DaemonClient {
         Ok(Self { stream })
     }
 
+    /// Connect to the daemon and verify version matches
+    pub async fn connect_with_version_check(repo_path: &Path) -> Result<Self> {
+        let mut client = Self::connect(repo_path).await?;
+
+        // Ping to get version
+        match client.request(DaemonRequest::Ping).await? {
+            DaemonResponse::Pong { version } => {
+                if let Some(daemon_version) = version {
+                    if daemon_version != VERSION {
+                        anyhow::bail!(
+                            "Version mismatch: vibe CLI is v{} but daemon is v{}.\n\
+                             Run 'vibe daemon stop' and retry to start a new daemon.",
+                            VERSION,
+                            daemon_version
+                        );
+                    }
+                }
+                // No version in response means old daemon - proceed with warning
+            }
+            _ => {}
+        }
+
+        Ok(client)
+    }
+
     /// Check if daemon is running for a repository
     pub async fn is_running(repo_path: &Path) -> bool {
         Self::connect(repo_path).await.is_ok()
@@ -50,7 +76,7 @@ impl DaemonClient {
     /// Ping the daemon
     pub async fn ping(&mut self) -> Result<bool> {
         match self.request(DaemonRequest::Ping).await? {
-            DaemonResponse::Pong => Ok(true),
+            DaemonResponse::Pong { .. } => Ok(true),
             _ => Ok(false),
         }
     }
@@ -87,10 +113,36 @@ impl DaemonClient {
     }
 }
 
-/// Start the daemon if not running
+/// Start the daemon if not running, with version check
 pub async fn ensure_daemon_running(repo_path: &Path) -> Result<()> {
-    if DaemonClient::is_running(repo_path).await {
-        return Ok(());
+    // First check if a daemon is already running
+    if let Ok(mut client) = DaemonClient::connect(repo_path).await {
+        // Check version
+        if let Ok(DaemonResponse::Pong { version }) = client.request(DaemonRequest::Ping).await {
+            if let Some(daemon_version) = version {
+                if daemon_version != VERSION {
+                    eprintln!(
+                        "Warning: Running daemon is v{} but CLI is v{}. Stopping old daemon...",
+                        daemon_version, VERSION
+                    );
+                    // Stop the old daemon
+                    let _ = client.shutdown().await;
+                    // Give it time to shut down
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                } else {
+                    // Version matches, we're good
+                    return Ok(());
+                }
+            } else {
+                // Old daemon without version - stop it
+                eprintln!("Warning: Running daemon is outdated (no version). Stopping...");
+                let _ = client.shutdown().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+        } else {
+            // Daemon is running and responded
+            return Ok(());
+        }
     }
 
     // Start the daemon
@@ -107,6 +159,10 @@ pub async fn ensure_daemon_running(repo_path: &Path) -> Result<()> {
     };
 
     let repo_path_str = repo_path.to_string_lossy();
+    let log_path = repo_path.join(".vibe").join("vibed.log");
+
+    // Clear old log file to get fresh error output
+    let _ = std::fs::remove_file(&log_path);
 
     std::process::Command::new(&vibed_cmd)
         .args(["-r", &repo_path_str])
@@ -121,7 +177,25 @@ pub async fn ensure_daemon_running(repo_path: &Path) -> Result<()> {
         }
     }
 
-    anyhow::bail!("Daemon failed to start within 5 seconds")
+    // Daemon failed to start - try to get error from log file
+    let error_detail = if log_path.exists() {
+        match std::fs::read_to_string(&log_path) {
+            Ok(log) => {
+                let lines: Vec<&str> = log.lines().collect();
+                let last_lines: Vec<&str> = lines.iter().rev().take(10).copied().collect();
+                if last_lines.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\nDaemon log ({}):\n{}", log_path.display(), last_lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
+                }
+            }
+            Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    anyhow::bail!("Daemon failed to start within 5 seconds.{}", error_detail)
 }
 
 /// Start the daemon in foreground mode (for debugging)

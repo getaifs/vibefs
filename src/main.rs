@@ -348,9 +348,13 @@ async fn main() -> Result<()> {
                             nfs_port,
                             session_count,
                             uptime_secs,
+                            version,
                         } => {
                             println!("Daemon Status:");
                             println!("  Repository: {}", repo_path);
+                            if let Some(v) = version {
+                                println!("  Version: {}", v);
+                            }
                             println!("  NFS Port: {}", nfs_port);
                             println!("  Active Sessions: {}", session_count);
                             println!("  Uptime: {}s", uptime_secs);

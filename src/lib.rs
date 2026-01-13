@@ -7,6 +7,9 @@ pub mod commands;
 pub mod cwd_validation;
 pub mod daemon_client;
 
+/// Package version from Cargo.toml
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// IPC message types for daemon communication
 pub mod daemon_ipc {
     use serde::{Deserialize, Serialize};
@@ -25,12 +28,17 @@ pub mod daemon_ipc {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "type")]
     pub enum DaemonResponse {
-        Pong,
+        Pong {
+            #[serde(default)]
+            version: Option<String>,
+        },
         Status {
             repo_path: String,
             nfs_port: u16,
             session_count: usize,
             uptime_secs: u64,
+            #[serde(default)]
+            version: Option<String>,
         },
         SessionExported {
             vibe_id: String,

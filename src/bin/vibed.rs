@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, RwLock};
 use vibefs::db::MetadataStore;
 use vibefs::git::GitRepo;
 use vibefs::nfs::VibeNFS;
+use vibefs::VERSION;
 
 /// Default idle timeout: 20 minutes
 const IDLE_TIMEOUT_SECS: u64 = 20 * 60;
@@ -71,12 +72,17 @@ enum DaemonRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 enum DaemonResponse {
-    Pong,
+    Pong {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
     Status {
         repo_path: String,
         nfs_port: u16,
         session_count: usize,
         uptime_secs: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     SessionExported {
         vibe_id: String,
@@ -143,7 +149,9 @@ async fn handle_client(
         }
 
         let response = match request {
-            DaemonRequest::Ping => DaemonResponse::Pong,
+            DaemonRequest::Ping => DaemonResponse::Pong {
+                version: Some(VERSION.to_string()),
+            },
 
             DaemonRequest::Status => {
                 let state = state.lock().await;
@@ -152,6 +160,7 @@ async fn handle_client(
                     nfs_port: 0, // Using per-session ports now
                     session_count: state.sessions.len(),
                     uptime_secs: start_time.elapsed().as_secs(),
+                    version: Some(VERSION.to_string()),
                 }
             }
 
@@ -329,6 +338,9 @@ async fn run_idle_checker(
 async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
     let vibe_dir = repo_path.join(".vibe");
 
+    eprintln!("[vibed] Starting daemon for {}", repo_path.display());
+    eprintln!("[vibed] Vibe dir: {}", vibe_dir.display());
+
     // Verify VibeFS is initialized
     if !vibe_dir.exists() {
         anyhow::bail!(
@@ -340,22 +352,30 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
     let socket_path = get_socket_path(&repo_path);
     let pid_path = get_pid_path(&repo_path);
 
+    eprintln!("[vibed] Socket path: {}", socket_path.display());
+    eprintln!("[vibed] PID path: {}", pid_path.display());
+
     // Check if daemon is already running
     if socket_path.exists() {
+        eprintln!("[vibed] Socket file exists, checking if daemon is alive...");
         // Try to connect to see if it's alive
         if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
             anyhow::bail!("Daemon already running for this repository");
         }
         // Stale socket, remove it
+        eprintln!("[vibed] Removing stale socket file");
         std::fs::remove_file(&socket_path).ok();
     }
 
-    eprintln!("[vibed] Starting daemon for {}", repo_path.display());
-
     // Open metadata and git
+    eprintln!("[vibed] Opening metadata store...");
     let metadata = MetadataStore::open(vibe_dir.join("metadata.db"))
         .context("Failed to open metadata store")?;
+    eprintln!("[vibed] Metadata store opened successfully");
+
+    eprintln!("[vibed] Opening Git repository...");
     let git = GitRepo::open(&repo_path).context("Failed to open Git repository")?;
+    eprintln!("[vibed] Git repository opened successfully");
 
     // Create daemon state
     let state = Arc::new(Mutex::new(DaemonState {
@@ -367,13 +387,17 @@ async fn run_daemon(repo_path: PathBuf, foreground: bool) -> Result<()> {
     }));
 
     // Write PID file
+    eprintln!("[vibed] Writing PID file...");
     std::fs::write(&pid_path, std::process::id().to_string())?;
+    eprintln!("[vibed] PID {} written to {}", std::process::id(), pid_path.display());
 
     // Create Unix socket listener
+    eprintln!("[vibed] Binding Unix socket...");
     let uds_listener =
         UnixListener::bind(&socket_path).context("Failed to bind Unix domain socket")?;
 
     eprintln!("[vibed] Listening on {}", socket_path.display());
+    eprintln!("[vibed] Daemon ready to accept connections");
 
     // Shutdown channel
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
