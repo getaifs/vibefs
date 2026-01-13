@@ -54,8 +54,20 @@ enum Commands {
 
     /// Promote a vibe session into a Git commit
     Promote {
-        /// Vibe ID to promote
-        vibe_id: String,
+        /// Vibe ID to promote (required unless --all is used)
+        vibe_id: Option<String>,
+
+        /// Promote all sessions with dirty files
+        #[arg(long)]
+        all: bool,
+
+        /// Only promote files matching these glob patterns
+        #[arg(long, value_delimiter = ',')]
+        only: Option<Vec<String>>,
+
+        /// Custom commit message
+        #[arg(short, long)]
+        message: Option<String>,
     },
 
     /// Close a vibe session (unmount and clean up)
@@ -192,8 +204,14 @@ async fn main() -> Result<()> {
         Commands::Restore { session, snapshot, no_backup } => {
             commands::restore::restore(&repo_path, &session, &snapshot, no_backup).await?;
         }
-        Commands::Promote { vibe_id } => {
-            commands::promote::promote(&repo_path, &vibe_id).await?;
+        Commands::Promote { vibe_id, all, only, message } => {
+            if all {
+                commands::promote::promote_all(&repo_path, message.as_deref()).await?;
+            } else if let Some(id) = vibe_id {
+                commands::promote::promote(&repo_path, &id, only, message.as_deref()).await?;
+            } else {
+                anyhow::bail!("Either provide a session ID or use --all");
+            }
         }
         Commands::Close { session, force, dirty } => {
             commands::close::close(&repo_path, &session, force, dirty).await?;

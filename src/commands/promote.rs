@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use glob::Pattern;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -8,7 +9,12 @@ use crate::git::GitRepo;
 use crate::cwd_validation;
 
 /// Promote a vibe session into a Git commit
-pub async fn promote<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
+pub async fn promote<P: AsRef<Path>>(
+    repo_path: P,
+    vibe_id: &str,
+    only_paths: Option<Vec<String>>,
+    message: Option<&str>,
+) -> Result<()> {
     // Validate that we're running from the correct directory
     let _validated_root = cwd_validation::validate_cwd()
         .context("Cannot promote vibe session")?;
@@ -33,15 +39,34 @@ pub async fn promote<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> 
         .context("Failed to open Git repository")?;
 
     // Get dirty paths (modified files)
-    let dirty_paths = metadata.get_dirty_paths()
+    let all_dirty_paths = metadata.get_dirty_paths()
         .context("Failed to get dirty paths")?;
 
+    // Filter by --only patterns if provided
+    let dirty_paths: Vec<String> = if let Some(ref patterns) = only_paths {
+        let globs: Vec<Pattern> = patterns
+            .iter()
+            .filter_map(|p| Pattern::new(p).ok())
+            .collect();
+
+        all_dirty_paths
+            .into_iter()
+            .filter(|path| globs.iter().any(|g| g.matches(path)))
+            .collect()
+    } else {
+        all_dirty_paths
+    };
+
     if dirty_paths.is_empty() {
-        println!("No changes to promote");
+        if only_paths.is_some() {
+            println!("No changes matching the specified patterns to promote");
+        } else {
+            println!("No changes to promote");
+        }
         return Ok(());
     }
 
-    println!("Found {} modified files:", dirty_paths.len());
+    println!("Promoting {} files:", dirty_paths.len());
     for path in &dirty_paths {
         println!("  - {}", path);
     }
@@ -116,7 +141,9 @@ pub async fn promote<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> 
     let _ = std::fs::remove_file(&temp_index);
 
     // Create commit with HEAD as parent
-    let commit_message = format!("Vibe promotion: {}\n\nPromoted changes from vibe session", vibe_id);
+    let commit_message = message
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| format!("Vibe promotion: {}\n\nPromoted changes from vibe session", vibe_id));
 
     let commit_oid = git.create_commit(&tree_oid, &head_oid, &commit_message)
         .context("Failed to create commit")?;
@@ -131,6 +158,66 @@ pub async fn promote<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> 
     println!("  Reference: {}", ref_name);
     println!("  Commit: {}", commit_oid);
     println!("\nTo merge into main, run: vibe commit {}", vibe_id);
+
+    Ok(())
+}
+
+/// Promote all sessions with dirty files
+pub async fn promote_all<P: AsRef<Path>>(
+    repo_path: P,
+    message: Option<&str>,
+) -> Result<()> {
+    let repo_path = repo_path.as_ref();
+    let vibe_dir = repo_path.join(".vibe");
+    let sessions_dir = vibe_dir.join("sessions");
+
+    if !sessions_dir.exists() {
+        println!("No sessions found.");
+        return Ok(());
+    }
+
+    // Get all sessions (directories that aren't snapshots)
+    let sessions: Vec<String> = std::fs::read_dir(&sessions_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|name| !name.contains("_snapshot_"))
+        .collect();
+
+    if sessions.is_empty() {
+        println!("No sessions found.");
+        return Ok(());
+    }
+
+    println!("Promoting {} sessions...", sessions.len());
+
+    let mut promoted = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+
+    for session in &sessions {
+        print!("  {}: ", session);
+
+        match promote(repo_path, session, None, message).await {
+            Ok(_) => {
+                // Check if anything was actually promoted
+                let git = GitRepo::open(repo_path)?;
+                if git.get_ref(&format!("refs/vibes/{}", session))?.is_some() {
+                    println!("✓ promoted");
+                    promoted += 1;
+                } else {
+                    println!("✓ (no changes)");
+                    skipped += 1;
+                }
+            }
+            Err(e) => {
+                println!("✗ {}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    println!("\nDone. {} promoted, {} skipped, {} failed.", promoted, skipped, failed);
 
     Ok(())
 }
@@ -205,7 +292,7 @@ mod tests {
         } // metadata is dropped here, releasing the lock
 
         // Promote
-        promote(repo_path, "test-vibe").await.unwrap();
+        promote(repo_path, "test-vibe", None, None).await.unwrap();
 
         // Verify reference was created
         let git = GitRepo::open(repo_path).unwrap();
