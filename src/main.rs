@@ -128,7 +128,18 @@ enum Commands {
     },
 
     /// Show daemon and session status
-    Status,
+    Status {
+        /// Show details for a specific session
+        session: Option<String>,
+
+        /// Show cross-session file conflicts
+        #[arg(long)]
+        conflicts: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Clean up VibeFS data (all or specific session)
     Purge {
@@ -322,81 +333,8 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Status => {
-            let vibe_dir = repo_path.join(".vibe");
-            if !vibe_dir.exists() {
-                println!("VibeFS not initialized. Run 'vibe init' first.");
-                return Ok(());
-            }
-
-            println!("VibeFS Status for: {}", repo_path.display());
-            println!("================================================================================");
-
-            // Check daemon status
-            if DaemonClient::is_running(&repo_path).await {
-                let mut client = DaemonClient::connect(&repo_path).await?;
-                match client.status().await? {
-                    DaemonResponse::Status {
-                        nfs_port,
-                        session_count,
-                        uptime_secs,
-                        ..
-                    } => {
-                        println!("DAEMON: RUNNING (PID: {})", std::fs::read_to_string(vibefs::daemon_ipc::get_pid_path(&repo_path)).unwrap_or_default().trim());
-                        println!("  Uptime:       {}s", uptime_secs);
-                        println!("  Global Port:  {}", nfs_port);
-                        println!("  Sessions:     {}", session_count);
-
-                        // List sessions
-                        if let Ok(DaemonResponse::Sessions { sessions }) =
-                            client.list_sessions().await
-                        {
-                            if !sessions.is_empty() {
-                                println!("\nACTIVE SESSIONS:");
-                                println!("  {:<20} {:<10} {:<10} {:<40}", "ID", "PORT", "UPTIME", "MOUNT POINT");
-                                println!("  {:-<20} {:-<10} {:-<10} {:-<40}", "", "", "", "");
-                                for session in sessions {
-                                    println!(
-                                        "  {:<20} {:<10} {:<10} {:<40}",
-                                        session.vibe_id,
-                                        session.nfs_port,
-                                        format!("{}s", session.uptime_secs),
-                                        session.mount_point
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        println!("DAEMON: Unknown status");
-                    }
-                }
-            } else {
-                println!("DAEMON: NOT RUNNING");
-            }
-
-            // List session directories
-            let sessions_dir = vibe_dir.join("sessions");
-            if sessions_dir.exists() {
-                let mut local_sessions = Vec::new();
-                for entry in std::fs::read_dir(&sessions_dir)? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_dir() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if !name.contains("_snapshot_") {
-                            local_sessions.push(name);
-                        }
-                    }
-                }
-
-                if !local_sessions.is_empty() {
-                    println!("\nOFFLINE SESSIONS (in storage):");
-                    for session in local_sessions {
-                        println!("  - {}", session);
-                    }
-                }
-            }
-            println!("================================================================================");
+        Commands::Status { session, conflicts, json } => {
+            commands::status::status(&repo_path, session.as_deref(), conflicts, json).await?;
         }
         Commands::Purge { session, force } => {
             if let Some(session_id) = session {

@@ -7,3 +7,4 @@ pub mod close;
 pub mod diff;
 pub mod restore;
 pub mod inspect;
+pub mod status;
