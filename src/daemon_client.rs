@@ -1,12 +1,50 @@
 //! Client for communicating with the vibed daemon
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::daemon_ipc::{get_socket_path, DaemonRequest, DaemonResponse};
 use crate::VERSION;
+
+/// Clean up stale daemon state (socket, PID file, log) if daemon is not running
+async fn cleanup_stale_daemon_state(socket_path: &PathBuf, pid_path: &PathBuf, log_path: &PathBuf) {
+    let mut cleaned = false;
+
+    // Check if PID file exists and process is dead
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                // Check if process is still running (Unix-specific)
+                #[cfg(unix)]
+                {
+                    // kill -0 checks if process exists without sending a signal
+                    let exists = unsafe { libc::kill(pid, 0) == 0 };
+                    if !exists {
+                        eprintln!("  Cleaning up stale PID file (process {} not running)", pid);
+                        let _ = std::fs::remove_file(pid_path);
+                        cleaned = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if socket exists but daemon isn't responding
+    if socket_path.exists() {
+        if tokio::net::UnixStream::connect(socket_path).await.is_err() {
+            eprintln!("  Cleaning up stale socket file");
+            let _ = std::fs::remove_file(socket_path);
+            cleaned = true;
+        }
+    }
+
+    // Clear old log file for fresh diagnostics
+    if cleaned || log_path.exists() {
+        let _ = std::fs::remove_file(log_path);
+    }
+}
 
 /// Client for communicating with the vibed daemon
 pub struct DaemonClient {
@@ -160,40 +198,78 @@ pub async fn ensure_daemon_running(repo_path: &Path) -> Result<()> {
 
     let repo_path_str = repo_path.to_string_lossy();
     let log_path = repo_path.join(".vibe").join("vibed.log");
+    let socket_path = crate::daemon_ipc::get_socket_path(repo_path);
+    let pid_path = crate::daemon_ipc::get_pid_path(repo_path);
 
-    // Clear old log file to get fresh error output
-    let _ = std::fs::remove_file(&log_path);
+    // Clean up stale state from crashed daemon
+    cleanup_stale_daemon_state(&socket_path, &pid_path, &log_path).await;
 
-    std::process::Command::new(&vibed_cmd)
+    eprintln!("  Starting daemon: {}", vibed_cmd);
+
+    let mut child = std::process::Command::new(&vibed_cmd)
         .args(["-r", &repo_path_str])
         .spawn()
         .with_context(|| format!("Failed to start daemon: {}", vibed_cmd))?;
 
-    // Wait for daemon to be ready
-    for _ in 0..50 {
+    // Wait for daemon to be ready, checking if process died
+    for i in 0..50 {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Check if child process died (only works for direct child, not daemonized)
+        if i < 5 {
+            // Only check early - after daemonizing, the child exits normally
+            if let Ok(Some(status)) = child.try_wait() {
+                if !status.success() {
+                    let code = status.code().unwrap_or(-1);
+                    anyhow::bail!(
+                        "Daemon process exited immediately with code {}.\n\
+                         Binary: {}\n\
+                         This may indicate the binary was killed by macOS security.\n\
+                         Try running 'vibed -f' manually to see the error.",
+                        code,
+                        vibed_cmd
+                    );
+                }
+            }
+        }
+
         if DaemonClient::is_running(repo_path).await {
             return Ok(());
         }
     }
 
-    // Daemon failed to start - try to get error from log file
-    let error_detail = if log_path.exists() {
-        match std::fs::read_to_string(&log_path) {
-            Ok(log) => {
-                let lines: Vec<&str> = log.lines().collect();
+    // Daemon failed to start - gather diagnostics
+    let mut error_detail = format!("\n\nBinary used: {}", vibed_cmd);
+
+    // Check if log file has any content
+    if log_path.exists() {
+        if let Ok(log) = std::fs::read_to_string(&log_path) {
+            let lines: Vec<&str> = log.lines().collect();
+            if !lines.is_empty() {
                 let last_lines: Vec<&str> = lines.iter().rev().take(10).copied().collect();
-                if last_lines.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n\nDaemon log ({}):\n{}", log_path.display(), last_lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
-                }
+                error_detail.push_str(&format!(
+                    "\n\nDaemon log ({}):\n{}",
+                    log_path.display(),
+                    last_lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+                ));
+            } else {
+                error_detail.push_str("\n\nDaemon log exists but is empty.");
             }
-            Err(_) => String::new(),
         }
     } else {
-        String::new()
-    };
+        error_detail.push_str(&format!(
+            "\n\nNo daemon log found at {}.\n\
+             The daemon may have been killed before it could start.\n\
+             Try running 'vibed -f -r {}' manually to see the error.",
+            log_path.display(),
+            repo_path_str
+        ));
+    }
+
+    // Check if socket was created but daemon isn't responding
+    if socket_path.exists() {
+        error_detail.push_str("\n\nSocket file exists but daemon is not responding. Possible stale socket.");
+    }
 
     anyhow::bail!("Daemon failed to start within 5 seconds.{}", error_detail)
 }
