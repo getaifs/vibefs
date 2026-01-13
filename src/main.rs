@@ -38,6 +38,20 @@ enum Commands {
         vibe_id: String,
     },
 
+    /// Restore session state from a snapshot
+    Restore {
+        /// Session ID to restore
+        session: String,
+
+        /// Snapshot name to restore from
+        #[arg(long)]
+        snapshot: String,
+
+        /// Skip automatic backup of current state
+        #[arg(long)]
+        no_backup: bool,
+    },
+
     /// Promote a vibe session into a Git commit
     Promote {
         /// Vibe ID to promote
@@ -153,6 +167,9 @@ async fn main() -> Result<()> {
         }
         Commands::Snapshot { vibe_id } => {
             commands::snapshot::snapshot(&repo_path, &vibe_id).await?;
+        }
+        Commands::Restore { session, snapshot, no_backup } => {
+            commands::restore::restore(&repo_path, &session, &snapshot, no_backup).await?;
         }
         Commands::Promote { vibe_id } => {
             commands::promote::promote(&repo_path, &vibe_id).await?;

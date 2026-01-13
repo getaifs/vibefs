@@ -5,3 +5,4 @@ pub mod promote;
 pub mod purge;
 pub mod close;
 pub mod diff;
+pub mod restore;
