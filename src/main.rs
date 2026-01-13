@@ -105,6 +105,16 @@ enum Commands {
         command: Option<String>,
     },
 
+    /// Launch an agent in a new vibe session
+    Launch {
+        /// Agent binary name (claude, cursor, aider, code, etc.)
+        agent: String,
+
+        /// Use specific session name (default: auto-generated like "clever-claude")
+        #[arg(long)]
+        session: Option<String>,
+    },
+
     /// Daemon management commands
     Daemon {
         #[command(subcommand)]
@@ -311,6 +321,9 @@ async fn main() -> Result<()> {
                     anyhow::bail!("Unexpected daemon response");
                 }
             }
+        }
+        Commands::Launch { agent, session } => {
+            commands::launch::launch(&repo_path, &agent, session.as_deref()).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {
