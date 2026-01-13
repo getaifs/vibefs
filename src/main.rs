@@ -99,6 +99,16 @@ enum Commands {
         action: DaemonAction,
     },
 
+    /// Inspect session metadata for debugging
+    Inspect {
+        /// Session ID to inspect
+        session: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show unified diff of session changes
     Diff {
         /// Session ID to show diff for
@@ -223,6 +233,9 @@ async fn main() -> Result<()> {
                     anyhow::bail!("Unexpected daemon response");
                 }
             }
+        }
+        Commands::Inspect { session, json } => {
+            commands::inspect::inspect(&repo_path, &session, json).await?;
         }
         Commands::Diff { session, stat, color, no_pager } => {
             let color_opt = color.parse().unwrap_or(commands::diff::ColorOption::Auto);
