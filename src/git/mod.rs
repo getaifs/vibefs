@@ -26,6 +26,11 @@ impl GitRepo {
         Ok(Self { repo_path })
     }
 
+    /// Get the repository path
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
+    }
+
     pub fn head_commit(&self) -> Result<String> {
         let output = Command::new("git")
             .args(&["rev-parse", "HEAD"])

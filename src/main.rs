@@ -85,6 +85,24 @@ enum Commands {
         action: DaemonAction,
     },
 
+    /// Show unified diff of session changes
+    Diff {
+        /// Session ID to show diff for
+        session: String,
+
+        /// Show diffstat summary only
+        #[arg(long)]
+        stat: bool,
+
+        /// Color output: auto, always, never
+        #[arg(long, default_value = "auto")]
+        color: String,
+
+        /// Disable pager (less)
+        #[arg(long)]
+        no_pager: bool,
+    },
+
     /// Show daemon and session status
     Status,
 
@@ -188,6 +206,10 @@ async fn main() -> Result<()> {
                     anyhow::bail!("Unexpected daemon response");
                 }
             }
+        }
+        Commands::Diff { session, stat, color, no_pager } => {
+            let color_opt = color.parse().unwrap_or(commands::diff::ColorOption::Auto);
+            commands::diff::diff(&repo_path, &session, stat, color_opt, no_pager).await?;
         }
         Commands::Dashboard => {
             tui::run_dashboard(&repo_path).await?;
