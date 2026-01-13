@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cwd_validation;
 use crate::daemon_client::{ensure_daemon_running, DaemonClient};
 use crate::daemon_ipc::DaemonResponse;
+use crate::git::GitRepo;
 
 /// Spawn a new vibe workspace
 pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
@@ -20,6 +22,10 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
     if !vibe_dir.exists() {
         anyhow::bail!("VibeFS not initialized. Run 'vibe init' first.");
     }
+
+    // Capture HEAD commit at spawn time
+    let git_repo = GitRepo::open(repo_path)?;
+    let spawn_commit = git_repo.head_commit().ok();
 
     // Ensure daemon is running
     println!("  Ensuring daemon is running...");
@@ -44,6 +50,8 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
                 session_dir: vibe_dir.join("sessions").join(&vibe_id),
                 mount_point: PathBuf::from(&mount_point),
                 port: nfs_port,
+                spawn_commit: spawn_commit.clone(),
+                created_at: Some(Utc::now().to_rfc3339()),
             };
 
             let info_path = vibe_dir.join("sessions").join(format!("{}.json", vibe_id));
@@ -141,6 +149,12 @@ pub struct SpawnInfo {
     pub session_dir: PathBuf,
     pub mount_point: PathBuf,
     pub port: u16,
+    /// The HEAD commit at spawn time (for diff and drift detection)
+    #[serde(default)]
+    pub spawn_commit: Option<String>,
+    /// Timestamp when session was created
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 impl SpawnInfo {
@@ -167,6 +181,10 @@ pub async fn spawn_local<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<
         anyhow::bail!("VibeFS not initialized. Run 'vibe init' first.");
     }
 
+    // Capture HEAD commit at spawn time
+    let git_repo = GitRepo::open(repo_path)?;
+    let spawn_commit = git_repo.head_commit().ok();
+
     // Create session directory
     let session_dir = vibe_dir.join("sessions").join(vibe_id);
     std::fs::create_dir_all(&session_dir)
@@ -183,6 +201,8 @@ pub async fn spawn_local<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<
         session_dir: session_dir.clone(),
         mount_point: mount_point.clone(),
         port: 0,
+        spawn_commit,
+        created_at: Some(Utc::now().to_rfc3339()),
     };
 
     let info_path = vibe_dir.join("sessions").join(format!("{}.json", vibe_id));
@@ -248,6 +268,8 @@ mod tests {
             session_dir: PathBuf::from("/tmp/session"),
             mount_point: PathBuf::from("/tmp/mount"),
             port: 12345,
+            spawn_commit: Some("abc123def456".to_string()),
+            created_at: Some("2026-01-13T10:00:00Z".to_string()),
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -255,5 +277,23 @@ mod tests {
 
         assert_eq!(parsed.vibe_id, "test-vibe");
         assert_eq!(parsed.port, 12345);
+        assert_eq!(parsed.spawn_commit, Some("abc123def456".to_string()));
+        assert!(parsed.created_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_info_backward_compatible() {
+        // Old JSON without spawn_commit should still parse
+        let old_json = r#"{
+            "vibe_id": "old-session",
+            "session_dir": "/tmp/session",
+            "mount_point": "/tmp/mount",
+            "port": 9999
+        }"#;
+
+        let parsed: SpawnInfo = serde_json::from_str(old_json).unwrap();
+        assert_eq!(parsed.vibe_id, "old-session");
+        assert_eq!(parsed.spawn_commit, None);
+        assert_eq!(parsed.created_at, None);
     }
 }

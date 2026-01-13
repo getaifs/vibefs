@@ -28,8 +28,8 @@ enum Commands {
 
     /// Spawn a new vibe workspace
     Spawn {
-        /// Vibe ID for the new workspace
-        vibe_id: String,
+        /// Vibe ID for the new workspace (auto-generated if not provided)
+        vibe_id: Option<String>,
     },
 
     /// Create a zero-cost snapshot of a vibe session
@@ -127,6 +127,10 @@ async fn main() -> Result<()> {
             commands::init::init(&repo_path).await?;
         }
         Commands::Spawn { vibe_id } => {
+            let vibe_id = vibe_id.unwrap_or_else(|| {
+                let sessions_dir = repo_path.join(".vibe/sessions");
+                vibefs::names::generate_unique_name(&sessions_dir)
+            });
             commands::spawn::spawn(&repo_path, &vibe_id).await?;
         }
         Commands::Snapshot { vibe_id } => {
