@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.6.0] - 2026-01-14
+
+### Fixed
+- **Stale NFS mount recovery**: When daemon crashes/restarts, mounts are now properly cleaned up and remounted
+  - `mount_nfs` detects existing mounts and unmounts stale ones before remounting
+  - `vibe sh` now calls `mount_nfs` to handle stale mounts (like `vibe spawn` does)
+  - No more hanging commands after daemon restart
+- **Test cleanup**: Workflow tests now properly unmount NFS and kill daemon processes on cleanup
+- **macOS code signing**: Dev install script re-signs binaries after copy to prevent SIGKILL
+
+### Changed
+- `mount_nfs` is now a public function for use by other commands
+- Improved mount handling to prevent stacked/duplicate mounts
+
 ## [0.5.2] - 2026-01-14
 
 ### Fixed
@@ -101,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dirty file tracking requires manual marking
 - Requires RocksDB system library
 
-[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/getaifs/vibefs/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/getaifs/vibefs/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/getaifs/vibefs/compare/v0.2.9...v0.5.1
 [0.2.9]: https://github.com/getaifs/vibefs/compare/v0.1.0...v0.2.9
