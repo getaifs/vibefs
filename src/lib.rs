@@ -1,5 +1,6 @@
 pub mod db;
 pub mod git;
+pub mod gitignore;
 pub mod names;
 pub mod nfs;
 pub mod tui;

@@ -7,6 +7,7 @@ use std::process::Command;
 use crate::commands::spawn::SpawnInfo;
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
+use crate::gitignore::PromoteFilter;
 use crate::cwd_validation;
 
 /// Promote a vibe session into a Git commit
@@ -65,6 +66,28 @@ pub async fn promote<P: AsRef<Path>>(
         all_dirty_paths = scan_session_directory(&session_dir)?;
     }
 
+    // Create gitignore filter
+    let filter = PromoteFilter::new(repo_path, Some(&session_dir))
+        .context("Failed to load .gitignore")?;
+
+    // Partition paths into promotable and ignored
+    let (promotable_refs, ignored_refs) = filter.partition_paths(&all_dirty_paths);
+    let promotable_paths: Vec<String> = promotable_refs.into_iter().cloned().collect();
+    let ignored_paths: Vec<String> = ignored_refs.into_iter().cloned().collect();
+
+    // Show ignored files if any
+    if !ignored_paths.is_empty() {
+        println!("Excluded (gitignored): {} files", ignored_paths.len());
+        // Show up to 5 ignored files as examples
+        for (i, path) in ignored_paths.iter().take(5).enumerate() {
+            println!("  - {}", path);
+            if i == 4 && ignored_paths.len() > 5 {
+                println!("  ... and {} more", ignored_paths.len() - 5);
+            }
+        }
+        println!();
+    }
+
     // Filter by --only patterns if provided
     let dirty_paths: Vec<String> = if let Some(ref patterns) = only_paths {
         let globs: Vec<Pattern> = patterns
@@ -72,17 +95,19 @@ pub async fn promote<P: AsRef<Path>>(
             .filter_map(|p| Pattern::new(p).ok())
             .collect();
 
-        all_dirty_paths
+        promotable_paths
             .into_iter()
             .filter(|path| globs.iter().any(|g| g.matches(path)))
             .collect()
     } else {
-        all_dirty_paths
+        promotable_paths
     };
 
     if dirty_paths.is_empty() {
         if only_paths.is_some() {
             println!("No changes matching the specified patterns to promote");
+        } else if !ignored_paths.is_empty() {
+            println!("No promotable changes (all {} changes are gitignored)", ignored_paths.len());
         } else {
             println!("No changes to promote");
         }

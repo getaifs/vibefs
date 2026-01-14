@@ -400,24 +400,26 @@ fn print_overview(output: &StatusOverview, repo_path: &Path) {
 
         if !output.active_sessions.is_empty() {
             println!("\nACTIVE SESSIONS:");
-            println!("  {:<20} {:<8} {:<12} {:<10} {}", "SESSION", "DIRTY", "UPTIME", "BASE", "STATUS");
-            println!("  {:-<20} {:-<8} {:-<12} {:-<10} {:-<10}", "", "", "", "", "");
             for sess in &output.active_sessions {
                 let base_short = sess.base_commit.as_ref()
                     .map(|c| &c[..7.min(c.len())])
                     .unwrap_or("unknown");
                 let status = match sess.behind_head {
-                    Some(true) => "⚠ BEHIND",
-                    Some(false) => "✓ synced",
-                    None => "-",
+                    Some(true) => " ⚠ BEHIND",
+                    Some(false) => "",
+                    None => "",
                 };
                 println!(
-                    "  {:<20} {:<8} {:<12} {:<10} {}",
+                    "  {} [{}] base:{}{} → {}",
                     sess.id,
-                    sess.dirty_count,
-                    format_uptime(sess.uptime_secs),
+                    if sess.dirty_count > 0 {
+                        format!("{} dirty", sess.dirty_count)
+                    } else {
+                        "clean".to_string()
+                    },
                     base_short,
-                    status
+                    status,
+                    sess.mount_point
                 );
             }
 
