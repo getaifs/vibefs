@@ -27,7 +27,7 @@ VibeFS is a "Clean Slate" virtual filesystem designed to enable **Massively Para
 
 ### Technology Stack
 - **Language:** Rust (for safety and speed)
-- **FS Interface:** Userspace NFSv4 Server (via `nfsserve` or custom implementation)
+- **FS Interface:** Userspace NFSv3 Server (via `nfsserve` crate)
 - **Git Engine:** `gitoxide` (gix) for high-speed ODB access
 - **Database:** RocksDB for metadata persistence
 - **TUI:** Ratatui for the dashboard
@@ -39,10 +39,10 @@ Hydrates metadata by scanning `.git`, populating RocksDB with inode mappings for
 
 ### `vibe spawn <vibe-id>`
 Creates isolated NFS workspace:
-1. Starts local NFS server on random high port
-2. Creates `/tmp/vibe/<vibe-id>` directory
-3. Mounts NFS share
-4. Initializes CoW directory in `.vibe/sessions/<vibe-id>/`
+1. Ensures daemon is running (starts if needed)
+2. Creates session directory in `.vibe/sessions/<vibe-id>/`
+3. Creates mount point at `~/Library/Caches/vibe/mounts/<repo>-<vibe-id>/` (macOS)
+4. Mounts NFS share via the daemon's NFSv3 server
 
 ### `vibe snapshot`
 Creates zero-cost recovery point using `clonefile(2)` (macOS) or `ioctl_ficlonerange` (Linux) to duplicate session directory.
@@ -55,11 +55,11 @@ Serializes agent work into Git:
 4. Creates draft commit with current HEAD as parent
 5. Points `refs/vibes/<vibe-id>` to new commit
 
-### `vibe commit`
-Finalizes vibe into main history:
-1. Validates promotion hash from `refs/vibes/<vibe-id>`
-2. Moves branch HEAD to this hash
-3. Tears down NFS mount and cleans session deltas
+### `vibe close <vibe-id>`
+Closes a session:
+1. Unmounts the NFS share
+2. Cleans up session directory (optionally preserving dirty files)
+3. Use `git merge refs/vibes/<vibe-id>` to merge promoted changes into main
 
 ## Implementation Requirements
 
@@ -86,17 +86,17 @@ Files like `.env` or `node_modules`:
 ### Concurrency & Performance
 - Use `tokio` for async NFS server handling simultaneous I/O
 - Lazy load blobs from Git only on first READ request per inode
-- Implement RocksDB lock to prevent concurrent `vibe commit` on same branch ref
+- CLI commands use read-only RocksDB access to avoid lock contention with daemon
 
 ## Development Notes
 
 This is a greenfield project implementing a novel filesystem abstraction. When developing:
 
-1. The Git ODB is read-only from VibeFS's perspective—never write to `.git` except through proper gitoxide APIs during `promote`/`commit`.
+1. The Git ODB is read-only from VibeFS's perspective—never write to `.git` except through proper gitoxide APIs during `promote`.
 
 2. All write operations from agents go to `.vibe/sessions/<vibe-id>/`, which acts as a CoW overlay layer.
 
-3. The NFSv4 implementation must map POSIX file operations to this hybrid read-from-git/write-to-session architecture.
+3. The NFSv3 implementation maps POSIX file operations to this hybrid read-from-git/write-to-session architecture.
 
 4. RocksDB metadata is the performance-critical path—design schema carefully for fast inode lookups during NFS operations.
 
@@ -121,33 +121,41 @@ When working on features, follow this workflow:
    ```bash
    vibe spawn <agent-id>
    ```
-   Creates an isolated session at `.vibe/sessions/<agent-id>/`
+   Creates an isolated session with NFS mount at `~/Library/Caches/vibe/mounts/<repo>-<agent-id>/`
 
-3. **Make changes**:
-   - Modify files in `.vibe/sessions/<agent-id>/`
-   - Create new files as needed
-   - Work as if it's the main repository
-
-4. **Mark files as dirty** (for tracking):
+3. **Work in the mount point**:
    ```bash
-   mark_dirty . <file1> <file2> ...
-   ```
+   # Get the mount path
+   vibe path <agent-id>
 
-5. **Promote to Git commit**:
+   # Or use vibe sh to run commands
+   vibe sh -s <agent-id> -c "your command here"
+
+   # Or launch an agent directly
+   vibe launch claude --session <agent-id>
+   ```
+   Changes are automatically tracked by the daemon.
+
+4. **Promote to Git commit**:
    ```bash
    vibe promote <agent-id>
    ```
    Creates a commit at `refs/vibes/<agent-id>` with your changes
 
-6. **Finalize to main** (when ready):
+5. **Merge to main** (when ready):
    ```bash
-   vibe commit <agent-id>
+   git merge refs/vibes/<agent-id>
    ```
-   Moves HEAD to your commit and cleans up the session
+
+6. **Close session**:
+   ```bash
+   vibe close <agent-id>
+   ```
 
 ### Key Concepts
 
-- **Sessions**: Isolated workspaces in `.vibe/sessions/<agent-id>/`
+- **Sessions**: Isolated NFS-mounted workspaces
+- **Automatic dirty tracking**: Daemon tracks file modifications via NFS writes
 - **Zero-cost snapshots**: `vibe snapshot` creates instant backups
 - **Git integration**: All changes flow through proper Git commits
 - **Parallel work**: Multiple agents can work simultaneously in separate sessions
@@ -158,15 +166,18 @@ When working on features, follow this workflow:
 # Start working on a feature
 vibe spawn feature-auth
 
-# Make changes
-echo "impl auth" > .vibe/sessions/feature-auth/auth.rs
-mark_dirty . auth.rs
+# Launch Claude in the workspace
+vibe launch claude --session feature-auth
 
-# Promote and commit
+# Or work manually
+vibe sh -s feature-auth -c "echo 'impl auth' > auth.rs"
+
+# Promote changes to a Git ref
 vibe promote feature-auth
-vibe commit feature-auth
 
-# Your changes are now in main!
+# Merge to main
+git merge refs/vibes/feature-auth
+
+# Clean up
+vibe close feature-auth
 ```
-
-For more details, see the VibeFS documentation in the repository.

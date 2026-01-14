@@ -75,7 +75,7 @@ cargo build --release --target x86_64-unknown-linux-gnu
 
 # Create archive
 cd target/x86_64-unknown-linux-gnu/release
-tar -czf vibe-linux-x86_64.tar.gz vibe mark_dirty
+tar -czf vibe-linux-x86_64.tar.gz vibe vibed
 ```
 
 #### On macOS:
@@ -87,12 +87,12 @@ brew install rocksdb
 # Build for Intel
 cargo build --release --target x86_64-apple-darwin
 cd target/x86_64-apple-darwin/release
-tar -czf vibe-darwin-x86_64.tar.gz vibe mark_dirty
+tar -czf vibe-darwin-x86_64.tar.gz vibe vibed
 
 # Build for Apple Silicon (if on ARM Mac)
 cargo build --release --target aarch64-apple-darwin
 cd target/aarch64-apple-darwin/release
-tar -czf vibe-darwin-aarch64.tar.gz vibe mark_dirty
+tar -czf vibe-darwin-aarch64.tar.gz vibe vibed
 ```
 
 #### Cross-compilation on macOS:
@@ -190,7 +190,7 @@ The `.github/workflows/release.yml` workflow:
 1. **Triggers**: On pushing tags matching `v*.*.*`
 2. **Builds**: Linux (x86_64), macOS (x86_64 + ARM64)
 3. **Tests**: Runs `cargo test` before building
-4. **Artifacts**: Creates `.tar.gz` archives with `vibe` and `mark_dirty`
+4. **Artifacts**: Creates `.tar.gz` archives with `vibe` and `vibed`
 5. **Release**: Automatically creates GitHub release with all binaries
 
 ## Platform-Specific Notes

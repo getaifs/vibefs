@@ -32,20 +32,29 @@ This architecture allows agents to work independently without conflicts, while c
 - **macOS**: APFS filesystem (default on modern macOS)
 - **Linux**: Btrfs or XFS filesystem with reflink support
 
-## Building
+## Installation
+
+### macOS (Development)
+
+```bash
+# Clone and build
+git clone https://github.com/getaifs/vibefs.git
+cd vibefs
+cargo build --release
+
+# Install (includes code signing for macOS)
+./dev_scripts/install_mac.sh
+```
+
+### Linux
 
 ```bash
 # Install system dependencies (Fedora example)
-sudo dnf install gcc-c++ clang-devel
+sudo dnf install gcc-c++ clang-devel rocksdb-devel
 
-# Build the project
+# Build and install
 cargo build --release
-
-# Run tests
-cargo test
-
-# Install globally
-cargo install --path .
+cp target/release/vibe target/release/vibed ~/.local/bin/
 ```
 
 ## Quick Start
@@ -74,18 +83,25 @@ vibe spawn agent-1
 
 This creates:
 - A session directory at `.vibe/sessions/agent-1/`
-- An NFS mount point at `/tmp/vibe/agent-1/`
-- Metadata for tracking file changes
+- An NFS mount at `~/Library/Caches/vibe/mounts/<repo>-agent-1/` (macOS)
+- Automatic dirty file tracking via the daemon
 
 ### 3. Work in the Workspace
 
-Agent makes changes in the mounted workspace (simulated here):
+Work directly in the NFS mount point:
 
 ```bash
-# Agents would work in /tmp/vibe/agent-1/
-# For testing, we can directly modify the session directory
-echo "pub fn new_feature() -> bool { true }" > .vibe/sessions/agent-1/new_feature.rs
+# Get the mount path
+vibe path agent-1
+
+# Or use vibe sh to run commands in the session
+vibe sh -s agent-1 -c "echo 'hello' > newfile.txt"
+
+# Or launch an agent directly
+vibe launch claude --session agent-1
 ```
+
+Changes are automatically tracked by the daemon.
 
 ### 4. Create Snapshots (Optional)
 
@@ -95,7 +111,7 @@ Take zero-cost snapshots at any point:
 vibe snapshot agent-1
 ```
 
-### 5. Promote Changes
+### 5. Promote Changes to Git
 
 Serialize agent work into a Git commit:
 
@@ -109,32 +125,41 @@ This:
 - Commits with HEAD as parent
 - Points `refs/vibes/agent-1` to the new commit
 
-### 6. Merge into Main
+### 6. Merge to Main (Manual)
 
-Finalize the vibe into main history:
+After promotion, use standard Git commands to merge:
 
 ```bash
-vibe commit agent-1
+git merge refs/vibes/agent-1
+# or
+git cherry-pick refs/vibes/agent-1
 ```
 
-This updates HEAD and cleans up the session.
+### 7. Close Session
 
-### 7. Dashboard (Optional)
-
-Launch the TUI dashboard to monitor all active vibes:
+When done, close the session:
 
 ```bash
-vibe dashboard
+vibe close agent-1
 ```
 
 ## Core Commands
 
-- `vibe init` - Initialize VibeFS for a Git repository
-- `vibe spawn <vibe-id>` - Create an isolated agent workspace
-- `vibe snapshot <vibe-id>` - Take a zero-cost snapshot
-- `vibe promote <vibe-id>` - Serialize changes into a Git commit
-- `vibe commit <vibe-id>` - Merge vibe into main history
-- `vibe dashboard` - Launch TUI monitoring dashboard
+| Command | Description |
+|---------|-------------|
+| `vibe init` | Initialize VibeFS for a Git repository |
+| `vibe spawn <id>` | Create an isolated agent workspace with NFS mount |
+| `vibe sh -s <id>` | Execute commands in a session's mount point |
+| `vibe launch <agent>` | Spawn session and launch an agent (claude, cursor, etc.) |
+| `vibe snapshot <id>` | Take a zero-cost CoW snapshot |
+| `vibe restore <id>` | Restore session from a snapshot |
+| `vibe promote <id>` | Serialize changes into a Git commit |
+| `vibe close <id>` | Unmount and clean up a session |
+| `vibe status` | Show daemon and session status |
+| `vibe diff <id>` | Show unified diff of session changes |
+| `vibe inspect <id>` | Inspect session metadata for debugging |
+| `vibe dashboard` | Launch TUI monitoring dashboard |
+| `vibe daemon start/stop` | Manage the background daemon |
 
 ## Architecture
 
@@ -146,8 +171,15 @@ vibe dashboard
 ├── .vibe/                # VibeFS Sidecar
 │   ├── metadata.db       # RocksDB: Inode <-> Oid mapping
 │   ├── sessions/         # Writable deltas per vibe-id
-│   │   └── <vibe-id>/    # CoW layer for specific agent
+│   │   ├── <vibe-id>/    # CoW layer for specific agent
+│   │   └── <vibe-id>.json # Session metadata
 │   └── cache/            # Global CAS for build artifacts
+```
+
+### Mount Points (macOS)
+
+```
+~/Library/Caches/vibe/mounts/<repo>-<session>/
 ```
 
 ### Key Concepts
@@ -155,14 +187,15 @@ vibe dashboard
 1. **Non-Invasiveness**: `.git` is the source of truth; VibeFS is a sidecar overlay
 2. **Locality**: All metadata lives in `.vibe/`
 3. **Virtualization**: Workspaces are ephemeral NFS mounts
-4. **Cheap Snapshots**: Uses APFS/Reflinks for zero-cost snapshots
+4. **Cheap Snapshots**: Uses APFS clonefile / Linux reflinks for zero-cost snapshots
+5. **Automatic Tracking**: Daemon tracks dirty files via NFS write operations
 
 ### Technology Stack
 
 - **Rust**: Core implementation language
 - **gitoxide (gix)**: High-speed Git operations
 - **RocksDB**: Metadata persistence
-- **nfsserve**: Userspace NFSv4 server
+- **nfsserve**: Userspace NFSv3 server
 - **Ratatui**: Terminal UI dashboard
 
 ## Development
@@ -176,42 +209,24 @@ src/
 ├── nfs/        # NFS server implementation
 ├── commands/   # CLI command implementations
 ├── tui/        # Dashboard UI
+├── bin/        # vibed daemon
 ├── lib.rs      # Library root
 └── main.rs     # CLI entry point
 
 tests/
-└── integration_tests.rs  # End-to-end workflow tests
+├── integration_tests.rs  # Rust integration tests
+└── workflow_tests.sh     # Bash workflow tests
 ```
 
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run Rust tests
 cargo test
 
-# Run specific test
-cargo test test_full_workflow
-
-# Run with output
-cargo test -- --nocapture
+# Run workflow tests (requires built binaries)
+./tests/workflow_tests.sh
 ```
-
-### Code Style
-
-```bash
-# Format code
-cargo fmt
-
-# Lint
-cargo clippy
-```
-
-## Limitations & Future Work
-
-- **NFS Server**: Current implementation sets up infrastructure; full NFS server integration is WIP
-- **Conflict Resolution**: Basic implementation; advanced merge strategies needed
-- **Performance**: Optimizations needed for 100+ concurrent agents
-- **Windows Support**: Currently focused on Unix-like systems
 
 ## License
 
@@ -220,10 +235,3 @@ cargo clippy
 ## Contributing
 
 [Contribution guidelines here]
-
-## References
-
-- [Gitoxide](https://github.com/Byron/gitoxide)
-- [RocksDB](https://rocksdb.org/)
-- [NFSv4 RFC](https://tools.ietf.org/html/rfc7530)
-- [APFS clonefile(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/clonefile.2.html)
