@@ -56,7 +56,7 @@ vibe close my-session        # Clean up
 - **Writes**: Go to session directory (automatic tracking)
 - **Promote**: Hashes dirty files into Git commit
 
-See [docs/FILE_STATE_MATRIX.md](docs/FILE_STATE_MATRIX.md) for details.
+See [docs/file-states.md](docs/file-states.md) for details.
 
 ## License
 
