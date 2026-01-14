@@ -845,35 +845,35 @@ test_workflow_daemon_stop() {
 }
 
 # ============================================
-# WORKFLOW 25: Purge Specific Session
+# WORKFLOW 25: Close Specific Session
 # ============================================
-test_workflow_purge_session() {
+test_workflow_close_session_force() {
     local repo="$TEST_DIR/repo25"
     setup_test_repo "$repo"
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn purge-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN spawn close-test || { echo "spawn failed"; return 1; }
 
-    [ -d ".vibe/sessions/purge-test" ] || { echo "session not created"; return 1; }
+    [ -d ".vibe/sessions/close-test" ] || { echo "session not created"; return 1; }
 
-    # Test: vibe purge -s <session>
-    output=$($VIBE_BIN purge -s purge-test -f 2>&1)
+    # Test: vibe close <session> --force
+    output=$($VIBE_BIN close close-test --force 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        echo "vibe purge session failed"
+        echo "vibe close session failed"
         echo "Output: $output"
         return 1
     fi
 
     # Session should be gone
-    if [ -d ".vibe/sessions/purge-test" ]; then
-        echo "Session still exists after purge"
+    if [ -d ".vibe/sessions/close-test" ]; then
+        echo "Session still exists after close"
         return 1
     fi
 
-    echo "Purge session workflow passed"
+    echo "Close session workflow passed"
     return 0
 }
 
@@ -1208,7 +1208,7 @@ main() {
     run_test "22. Get Session Path" test_workflow_path
     run_test "23. Daemon Status" test_workflow_daemon_status
     run_test "24. Daemon Stop" test_workflow_daemon_stop
-    run_test "25. Purge Specific Session" test_workflow_purge_session
+    run_test "25. Close Session with Force" test_workflow_close_session_force
     run_test "26. Shell Command in Session" test_workflow_sh_command
     run_test "27. Multiple Parallel Sessions" test_workflow_parallel_sessions
     run_test "28. Conflict Detection" test_workflow_conflict_detection

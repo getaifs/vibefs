@@ -15,6 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.6.1] - 2026-01-14
+
+### Changed
+- **CLI naming consistency**: Standardized on `session` terminology everywhere (was mix of `vibe_id`/`session`)
+- **`vibe sh` no longer auto-creates sessions**: Now requires `--create` flag to create new sessions
+  - `vibe sh -s foo` errors if session doesn't exist
+  - `vibe sh --create -s foo` creates session if needed
+- **Removed `vibe purge -s` option**: Use `vibe close <session>` instead for closing specific sessions
+  - `vibe purge` now only cleans up all VibeFS data (no session-specific option)
+  - This removes lifecycle confusion between `purge -s` and `close`
+
+### Documentation
+- Cleaned up outdated documentation files
+- Removed `VIBEFS_WORKFLOW.md` (redundant with `CLAUDE.md`)
+- Removed `TEST_RESULTS.md` (outdated, `CHANGELOG.md` is authoritative)
+- Updated `RELEASING.md` to reference `vibed` instead of `mark_dirty`
+
 ## [0.6.0] - 2026-01-14
 
 ### Fixed
@@ -115,7 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dirty file tracking requires manual marking
 - Requires RocksDB system library
 
-[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/getaifs/vibefs/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/getaifs/vibefs/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/getaifs/vibefs/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/getaifs/vibefs/compare/v0.2.9...v0.5.1
