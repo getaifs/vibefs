@@ -86,8 +86,23 @@ setup_test_repo() {
 # Cleanup function
 cleanup() {
     log_info "Cleaning up..."
-    vibe daemon stop 2>/dev/null || true
+
+    # Stop all vibed daemons
+    pkill -9 vibed 2>/dev/null || true
     sleep 1
+
+    # Unmount all test NFS mounts
+    local mount_dir="$HOME/Library/Caches/vibe/mounts"
+    if [ -d "$mount_dir" ]; then
+        for mount in $(mount | grep "$mount_dir" | awk '{print $3}'); do
+            umount -f "$mount" 2>/dev/null || diskutil unmount force "$mount" 2>/dev/null || true
+        done
+        # Clean up mount directories created by tests
+        for dir in "$mount_dir"/repo*; do
+            [ -d "$dir" ] && rmdir "$dir" 2>/dev/null || true
+        done
+    fi
+
     rm -rf "$TEST_DIR" 2>/dev/null || true
 }
 
