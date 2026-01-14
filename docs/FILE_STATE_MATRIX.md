@@ -156,60 +156,26 @@ For each dirty file:
 
 ---
 
-## Current Limitations / Known Issues
+## Current Limitations
 
-### Not Yet Implemented
-1. **File Deletion Tracking**: Deleting a file in session doesn't mark it as "should be removed in promotion"
-2. **Hard Links**: NFSv3 LINK operation not implemented (nfsserve limitation)
+### Not Implemented
+1. **File Deletion Tracking**: Deleting a file in session doesn't propagate deletion to Git on promote
+2. **Hard Links**: NFSv3 LINK operation not supported
 
-### Edge Cases Needing Work
-1. **Hardlinks/Symlinks**: Partial support, may not work correctly
-2. **File Permissions**: Mode changes not tracked
-3. **Empty Directories**: Not persisted in Git (Git only tracks files)
-4. **Atomic Renames**: May not be atomic across session boundary
+### Edge Cases
+1. **File Permissions**: Mode changes not tracked
+2. **Empty Directories**: Not persisted in Git (Git only tracks files)
 
-### NFS Performance Considerations
-1. **File Locking**: NFS doesn't support the locking semantics that Rust's incremental compilation requires. For Cargo builds, set `CARGO_INCREMENTAL=0`:
-   ```bash
-   CARGO_INCREMENTAL=0 cargo build
-   ```
-2. **Build Artifacts**: Building large projects in NFS mounts is slower than local filesystems due to network overhead. Consider using `CARGO_TARGET_DIR` to place build artifacts on local storage.
+### Build Artifacts
 
----
+Build tools (Cargo, npm) don't work well with NFS due to xattr issues. VibeFS automatically symlinks artifact directories to local storage:
 
-## User Visibility Recommendations
+```
+target -> /tmp/vibe-artifacts/<id>/target
+node_modules -> /tmp/vibe-artifacts/<id>/node_modules
+```
 
-### In `vibe status`
-Show for each session:
-- Promotable files count
-- Excluded (gitignored) files count
-- Behind HEAD warning
-
-### In `vibe inspect`
-Show:
-- List of promotable files with status (new/modified)
-- List of excluded files (collapsed by directory)
-- Session base commit vs current HEAD
-
-### In TUI Dashboard
-Show:
-- `5 files (+127 excluded)` format
-- Color coding: Green (clean), Yellow (dirty), Blue (promoted)
-- Separate popup for promotable vs excluded files
-
----
-
-## Testing Checklist
-
-- [ ] Read tracked file (clean) → Git blob
-- [ ] Read tracked file (dirty) → Session delta
-- [ ] Read untracked file (Cargo.lock) → Repo passthrough
-- [ ] Write to tracked file → Session delta + mark dirty
-- [ ] Create new file → New inode + session delta + mark dirty
-- [ ] Promote excludes gitignored files
-- [ ] Promote includes new non-gitignored files
-- [ ] Status shows correct counts
-- [ ] TUI shows promotable vs excluded
+This allows builds to run natively while keeping source code in NFS.
 
 ---
 
