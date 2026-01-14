@@ -8,9 +8,20 @@ use vibefs::daemon_client::{self, DaemonClient};
 use vibefs::daemon_ipc::DaemonResponse;
 use vibefs::tui;
 
+/// Build version string with git hash
+fn version_string() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (",
+        env!("GIT_HASH"),
+        ")"
+    )
+}
+
 /// VibeFS - Massively Parallel AI Agent Filesystem
 #[derive(Parser)]
 #[command(name = "vibe")]
+#[command(version = version_string())]
 #[command(about = "A virtual filesystem for massively parallel AI agent workflows", long_about = None)]
 struct Cli {
     /// Path to the Git repository (defaults to current directory)
