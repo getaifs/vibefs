@@ -15,6 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.7.0] - 2026-01-14
+
+### Added
+- **Artifact symlinks for build tools**: Session spawn now creates symlinks for common build artifact directories to local storage (`/tmp/vibe-artifacts/<session>/`)
+  - `target/` (Rust/Cargo), `node_modules/` (npm), `.venv/` (Python), `__pycache__/`, `.next/` (Next.js), `.nuxt/` (Nuxt.js), `dist/`, `build/`
+  - Symlinks are registered in NFS metadata and visible through the mount
+  - Writes to these directories bypass NFS, avoiding macOS xattr issues with `fs::copy()` and similar operations
+  - Build artifacts are cleaned up automatically when session closes
+- **New tests**: Added unit tests for symlink handling in dirty file collection and NFS metadata
+
+### Fixed
+- **macOS NFS xattr issues**: Build tools like Cargo, npm, and pip no longer fail with ENOATTR errors when copying files
+  - Root cause was macOS `copyfile()` trying to preserve extended attributes on NFSv3 (which doesn't support xattrs)
+  - Symlinks to local storage solve this by routing writes to the local filesystem
+- **Dirty file detection**: Session close no longer traverses symlinks when listing dirty files
+  - Previously, closing a session with build artifacts would list thousands of files from `/tmp/vibe-artifacts/`
+
 ## [0.6.4] - 2026-01-14
 
 ### Fixed
@@ -152,7 +169,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dirty file tracking requires manual marking
 - Requires RocksDB system library
 
-[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/getaifs/vibefs/compare/v0.6.4...v0.7.0
+[0.6.4]: https://github.com/getaifs/vibefs/compare/v0.6.1...v0.6.4
 [0.6.1]: https://github.com/getaifs/vibefs/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/getaifs/vibefs/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/getaifs/vibefs/compare/v0.5.1...v0.5.2

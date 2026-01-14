@@ -191,6 +191,17 @@ async fn handle_client(
 
                     match setup_session_resources(&session_dir, &mount_point) {
                         Ok(_) => {
+                            // Set up artifact symlinks before creating NFS server
+                            // This registers them in metadata so NFS can expose them
+                            if let Err(e) = setup_artifact_symlinks(
+                                &session_dir,
+                                &vibe_id,
+                                &state_guard.metadata
+                            ).await {
+                                eprintln!("[vibed] Warning: Failed to setup artifact symlinks: {}", e);
+                                // Non-fatal - continue with spawn
+                            }
+
                             let nfs = VibeNFS::new(
                                 state_guard.metadata.clone(),
                                 state_guard.git.clone(),
@@ -198,7 +209,7 @@ async fn handle_client(
                                 state_guard.repo_path.clone(),
                                 vibe_id.clone()
                             );
-                            
+
                             if let Err(e) = nfs.build_directory_cache().await {
                                 DaemonResponse::Error {
                                     message: format!("Failed to build cache: {}", e),
@@ -302,6 +313,66 @@ async fn handle_client(
 fn setup_session_resources(session_dir: &Path, mount_point: &Path) -> Result<()> {
     std::fs::create_dir_all(session_dir)?;
     std::fs::create_dir_all(mount_point)?;
+    Ok(())
+}
+
+/// Directories that should be symlinked to local storage for performance
+/// and to avoid macOS NFS xattr issues with build tools.
+const ARTIFACT_DIRS: &[&str] = &[
+    "target",           // Rust/Cargo
+    "node_modules",     // Node.js/npm
+    ".venv",            // Python virtualenv
+    "__pycache__",      // Python cache
+    ".next",            // Next.js
+    ".nuxt",            // Nuxt.js
+    "dist",             // Common build output
+    "build",            // Common build output
+];
+
+/// Set up symlinks for build artifact directories and register them in metadata.
+/// These directories are symlinked to local storage (/tmp/vibe-artifacts/<session>/)
+/// to avoid macOS NFS xattr issues and improve build performance.
+async fn setup_artifact_symlinks(
+    session_dir: &Path,
+    vibe_id: &str,
+    metadata: &Arc<RwLock<MetadataStore>>,
+) -> Result<()> {
+    use vibefs::db::InodeMetadata;
+
+    let artifacts_base = PathBuf::from("/tmp/vibe-artifacts").join(vibe_id);
+
+    for dir_name in ARTIFACT_DIRS {
+        let local_path = artifacts_base.join(dir_name);
+        let symlink_path = session_dir.join(dir_name);
+
+        // Skip if symlink already exists
+        if symlink_path.exists() || symlink_path.is_symlink() {
+            continue;
+        }
+
+        // Create the local directory
+        std::fs::create_dir_all(&local_path)
+            .with_context(|| format!("Failed to create local artifact dir: {}", local_path.display()))?;
+
+        // Create symlink in session directory
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&local_path, &symlink_path)
+            .with_context(|| format!("Failed to create symlink: {} -> {}", symlink_path.display(), local_path.display()))?;
+
+        // Register symlink in metadata so NFS exposes it
+        let store = metadata.write().await;
+        let inode_id = store.next_inode_id()?;
+        let target_str = local_path.to_string_lossy().to_string();
+        let meta = InodeMetadata {
+            path: dir_name.to_string(),
+            git_oid: Some(format!("symlink:{}", target_str)),
+            is_dir: false,
+            size: target_str.len() as u64,
+            volatile: true,
+        };
+        store.put_inode(inode_id, &meta)?;
+    }
+
     Ok(())
 }
 

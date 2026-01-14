@@ -8,6 +8,19 @@ use crate::daemon_ipc::DaemonResponse;
 use crate::git::GitRepo;
 use crate::platform;
 
+/// Directories that should be symlinked to local storage for performance
+/// and to avoid macOS NFS xattr issues with build tools.
+const ARTIFACT_DIRS: &[&str] = &[
+    "target",           // Rust/Cargo
+    "node_modules",     // Node.js/npm
+    ".venv",            // Python virtualenv
+    "__pycache__",      // Python cache
+    ".next",            // Next.js
+    ".nuxt",            // Nuxt.js
+    "dist",             // Common build output
+    "build",            // Common build output
+];
+
 /// Spawn a new vibe workspace
 pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
     // Validate that we're running from the correct directory
@@ -57,6 +70,16 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
             let info_path = vibe_dir.join("sessions").join(format!("{}.json", vibe_id));
             let info_json = serde_json::to_string_pretty(&spawn_info)?;
             std::fs::write(&info_path, info_json)?;
+
+            // Create symlinks for build artifact directories
+            // These point to local storage to avoid NFS xattr issues with build tools
+            let session_dir = vibe_dir.join("sessions").join(&vibe_id);
+            if let Err(e) = setup_artifact_symlinks(&session_dir, &vibe_id) {
+                eprintln!("  Warning: Failed to setup artifact symlinks: {}", e);
+                // Non-fatal - continue with spawn
+            } else {
+                println!("  ✓ Build artifact directories linked to local storage");
+            }
 
             // Try to mount NFS (works automatically on macOS, requires manual step on Linux)
             println!("\n  NFS server running on port {}", nfs_port);
@@ -124,6 +147,48 @@ impl SpawnInfo {
         let info: SpawnInfo = serde_json::from_str(&json)?;
         Ok(info)
     }
+}
+
+/// Set up symlinks for build artifact directories.
+/// These directories are symlinked to local storage (/tmp/vibe-artifacts/<session>/)
+/// to avoid macOS NFS xattr issues and improve build performance.
+fn setup_artifact_symlinks(session_dir: &Path, vibe_id: &str) -> Result<()> {
+    // Base directory for local artifacts
+    let artifacts_base = PathBuf::from("/tmp/vibe-artifacts").join(vibe_id);
+
+    for dir_name in ARTIFACT_DIRS {
+        let local_path = artifacts_base.join(dir_name);
+        let symlink_path = session_dir.join(dir_name);
+
+        // Skip if symlink already exists
+        if symlink_path.exists() || symlink_path.is_symlink() {
+            continue;
+        }
+
+        // Create the local directory
+        std::fs::create_dir_all(&local_path)
+            .with_context(|| format!("Failed to create local artifact dir: {}", local_path.display()))?;
+
+        // Create symlink in session directory
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&local_path, &symlink_path)
+            .with_context(|| format!("Failed to create symlink: {} -> {}", symlink_path.display(), local_path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Clean up artifact symlinks and their local directories.
+/// Called when closing a session.
+pub fn cleanup_artifact_symlinks(vibe_id: &str) -> Result<()> {
+    let artifacts_base = PathBuf::from("/tmp/vibe-artifacts").join(vibe_id);
+
+    if artifacts_base.exists() {
+        std::fs::remove_dir_all(&artifacts_base)
+            .with_context(|| format!("Failed to cleanup artifacts: {}", artifacts_base.display()))?;
+    }
+
+    Ok(())
 }
 
 /// Local spawn without daemon (for testing and simple use cases)

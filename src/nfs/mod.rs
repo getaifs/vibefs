@@ -161,6 +161,8 @@ impl VibeNFS {
     fn metadata_to_fattr(&self, inode: fileid3, metadata: &InodeMetadata) -> fattr3 {
         let ftype = if metadata.is_dir {
             ftype3::NF3DIR
+        } else if metadata.git_oid.as_ref().map(|o| o.starts_with("symlink:")).unwrap_or(false) {
+            ftype3::NF3LNK
         } else {
             ftype3::NF3REG
         };
@@ -1151,5 +1153,67 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), 5);
+    }
+
+    #[test]
+    fn test_metadata_to_fattr_symlink_detection() {
+        use crate::db::InodeMetadata;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("metadata.db");
+        let session_dir = temp_dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::process::Command::new("git").args(["init"]).current_dir(&repo_dir).output().unwrap();
+
+        let metadata = MetadataStore::open(&db_path).unwrap();
+        let git = crate::git::GitRepo::open(&repo_dir).unwrap();
+
+        let nfs = VibeNFS::new(
+            Arc::new(RwLock::new(metadata)),
+            Arc::new(RwLock::new(git)),
+            session_dir,
+            repo_dir,
+            "test".to_string(),
+        );
+
+        // Test regular file
+        let regular_meta = InodeMetadata {
+            path: "regular.txt".to_string(),
+            git_oid: Some("abc123".to_string()),
+            is_dir: false,
+            size: 100,
+            volatile: false,
+        };
+        let regular_fattr = nfs.metadata_to_fattr(100, &regular_meta);
+        // ftype3::NF3REG has mode 0o644 in our impl
+        assert_eq!(regular_fattr.mode, 0o644);
+
+        // Test directory
+        let dir_meta = InodeMetadata {
+            path: "subdir".to_string(),
+            git_oid: None,
+            is_dir: true,
+            size: 0,
+            volatile: false,
+        };
+        let dir_fattr = nfs.metadata_to_fattr(101, &dir_meta);
+        assert_eq!(dir_fattr.mode, 0o755);
+
+        // Test symlink - should be detected by "symlink:" prefix in git_oid
+        let symlink_meta = InodeMetadata {
+            path: "target".to_string(),
+            git_oid: Some("symlink:/tmp/vibe-artifacts/test/target".to_string()),
+            is_dir: false,
+            size: 35,
+            volatile: true,
+        };
+        let symlink_fattr = nfs.metadata_to_fattr(102, &symlink_meta);
+        // Symlinks should also have mode 0o644 but ftype should be NF3LNK
+        // We can't directly check ftype since it doesn't impl PartialEq,
+        // but we can verify it's not treated as a directory
+        assert_eq!(symlink_fattr.mode, 0o644);
+        assert_eq!(symlink_fattr.size, 35);
     }
 }

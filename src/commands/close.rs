@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::Path;
 
+use crate::commands::spawn::cleanup_artifact_symlinks;
 use crate::daemon_client::DaemonClient;
 use crate::daemon_ipc::DaemonResponse;
 use crate::platform;
@@ -134,6 +135,11 @@ pub async fn close<P: AsRef<Path>>(
         }
     }
 
+    // Clean up local artifact directories
+    if let Err(e) = cleanup_artifact_symlinks(session_id) {
+        eprintln!("Warning: Failed to cleanup artifact directories: {}", e);
+    }
+
     // Remove session directory
     println!("Removing session directory...");
     std::fs::remove_dir_all(&session_dir)
@@ -177,6 +183,12 @@ fn collect_files_recursive(
             }
         }
 
+        // Skip symlinks - they point to external storage (like /tmp/vibe-artifacts)
+        // and their contents are not part of the session's dirty files
+        if path.is_symlink() {
+            continue;
+        }
+
         if path.is_dir() {
             collect_files_recursive(base, &path, files)?;
         } else {
@@ -201,4 +213,68 @@ pub async fn list_dirty<P: AsRef<Path>>(repo_path: P, session_id: &str) -> Resul
     }
 
     collect_dirty_files(&session_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_collect_dirty_files_skips_symlinks() {
+        let temp_dir = TempDir::new().unwrap();
+        let session_dir = temp_dir.path();
+
+        // Create a regular file
+        fs::write(session_dir.join("regular.txt"), "content").unwrap();
+
+        // Create a subdirectory with a file
+        fs::create_dir(session_dir.join("subdir")).unwrap();
+        fs::write(session_dir.join("subdir/nested.txt"), "nested").unwrap();
+
+        // Create a symlink to an external directory
+        let external_dir = TempDir::new().unwrap();
+        fs::write(external_dir.path().join("external.txt"), "external").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external_dir.path(), session_dir.join("target")).unwrap();
+
+        // Collect dirty files
+        let dirty = collect_dirty_files(session_dir).unwrap();
+
+        // Should include regular files but NOT files inside symlinked directories
+        assert!(dirty.contains(&"regular.txt".to_string()));
+        assert!(dirty.contains(&"subdir/nested.txt".to_string()));
+
+        // Should NOT contain files from symlinked directory
+        assert!(!dirty.iter().any(|f| f.starts_with("target/")));
+        assert!(!dirty.contains(&"target/external.txt".to_string()));
+    }
+
+    #[test]
+    fn test_collect_dirty_files_skips_macos_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let session_dir = temp_dir.path();
+
+        // Create regular files
+        fs::write(session_dir.join("normal.txt"), "content").unwrap();
+
+        // Create macOS metadata files that should be skipped
+        fs::write(session_dir.join("._hidden"), "apple double").unwrap();
+        fs::write(session_dir.join(".DS_Store"), "ds store").unwrap();
+
+        let dirty = collect_dirty_files(session_dir).unwrap();
+
+        assert!(dirty.contains(&"normal.txt".to_string()));
+        assert!(!dirty.contains(&"._hidden".to_string()));
+        assert!(!dirty.contains(&".DS_Store".to_string()));
+    }
+
+    #[test]
+    fn test_collect_dirty_files_empty_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let dirty = collect_dirty_files(temp_dir.path()).unwrap();
+        assert!(dirty.is_empty());
+    }
 }
