@@ -13,8 +13,6 @@ This repository uses VibeFS for managing parallel AI agent workflows on Git.
 
 ### Core Workflow
 
-When working on features, follow this workflow:
-
 1. **Initialize** (first time only):
    ```bash
    vibe init
@@ -22,57 +20,37 @@ When working on features, follow this workflow:
 
 2. **Spawn your workspace**:
    ```bash
-   vibe spawn <agent-id>
+   vibe spawn <session-name>
    ```
-   Creates an isolated session at `.vibe/sessions/<agent-id>/`
 
-3. **Make changes**:
-   - Modify files in `.vibe/sessions/<agent-id>/`
-   - Create new files as needed
-   - Work as if it's the main repository
-
-4. **Mark files as dirty** (for tracking):
+3. **Work in the NFS mount**:
    ```bash
-   mark_dirty . <file1> <file2> ...
+   vibe sh -s <session-name>  # Opens shell in mount
+   # Or: vibe launch claude --session <session-name>
    ```
+   Changes are automatically tracked.
 
-5. **Promote to Git commit**:
+4. **Promote to Git**:
    ```bash
-   vibe promote <agent-id>
+   vibe promote <session-name>
    ```
-   Creates a commit at `refs/vibes/<agent-id>` with your changes
 
-6. **Finalize to main** (when ready):
+5. **Merge to main**:
    ```bash
-   vibe commit <agent-id>
+   git merge refs/vibes/<session-name>
    ```
-   Moves HEAD to your commit and cleans up the session
 
-### Key Concepts
+6. **Close session**:
+   ```bash
+   vibe close <session-name>
+   ```
 
-- **Sessions**: Isolated workspaces in `.vibe/sessions/<agent-id>/`
-- **Zero-cost snapshots**: `vibe snapshot` creates instant backups
-- **Git integration**: All changes flow through proper Git commits
-- **Parallel work**: Multiple agents can work simultaneously in separate sessions
+### Key Commands
 
-### Example Session
-
-```bash
-# Start working on a feature
-vibe spawn feature-auth
-
-# Make changes
-echo "impl auth" > .vibe/sessions/feature-auth/auth.rs
-mark_dirty . auth.rs
-
-# Promote and commit
-vibe promote feature-auth
-vibe commit feature-auth
-
-# Your changes are now in main!
-```
-
-For more details, see the VibeFS documentation in the repository.
+- `vibe status` - Show daemon and session status
+- `vibe inspect <session>` - Detailed session info
+- `vibe diff <session>` - Show changes
+- `vibe snapshot <session>` - Create backup
 "#;
 
 /// Initialize VibeFS for a Git repository
@@ -102,8 +80,13 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
     std::fs::create_dir_all(&cache_dir)
         .context("Failed to create cache directory")?;
 
-    // Open/create metadata store
+    // Clear and recreate metadata store to ensure fresh state
+    // This prevents stale entries from old Git states
     let metadata_path = vibe_dir.join("metadata.db");
+    if metadata_path.exists() {
+        std::fs::remove_dir_all(&metadata_path)
+            .context("Failed to clear old metadata store")?;
+    }
     let metadata = MetadataStore::open(&metadata_path)
         .context("Failed to create metadata store")?;
 
