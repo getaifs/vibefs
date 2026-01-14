@@ -27,6 +27,7 @@ pub struct VibeNFS {
     metadata: Arc<RwLock<MetadataStore>>,
     git: Arc<RwLock<GitRepo>>,
     session_dir: PathBuf,
+    repo_path: PathBuf,
     #[allow(dead_code)]
     vibe_id: String,
     /// Cache of parent -> children mappings for directory enumeration
@@ -38,12 +39,14 @@ impl VibeNFS {
         metadata: Arc<RwLock<MetadataStore>>,
         git: Arc<RwLock<GitRepo>>,
         session_dir: PathBuf,
+        repo_path: PathBuf,
         vibe_id: String,
     ) -> Self {
         Self {
             metadata,
             git,
             session_dir,
+            repo_path,
             vibe_id,
             dir_children: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -345,7 +348,15 @@ impl NFSFileSystem for VibeNFS {
             let git = self.git.read().await;
             git.read_blob(oid).map_err(|_| nfsstat3::NFS3ERR_IO)?
         } else {
-            Vec::new()
+            // Untracked file - try to read from actual repo filesystem (passthrough)
+            let repo_file = self.repo_path.join(&metadata.path);
+            if repo_file.exists() && repo_file.is_file() {
+                tokio::fs::read(&repo_file)
+                    .await
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            } else {
+                Vec::new()
+            }
         };
 
         let start = offset as usize;
@@ -950,6 +961,7 @@ mod tests {
             Arc::new(RwLock::new(metadata)),
             Arc::new(RwLock::new(git)),
             session_dir,
+            repo_dir.clone(),
             "test".to_string(),
         );
 
@@ -979,6 +991,7 @@ mod tests {
             Arc::new(RwLock::new(metadata)),
             Arc::new(RwLock::new(git)),
             session_dir,
+            repo_dir,
             "test".to_string(),
         );
 

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::db::{InodeMetadata, MetadataStore};
 use crate::git::GitRepo;
+use crate::gitignore::is_commonly_ignored;
 use crate::cwd_validation;
 
 const VIBEFS_WORKFLOW_DOCS: &str = r#"
@@ -149,16 +150,19 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
         metadata.put_inode(inode_id, &dir_metadata)?;
     }
 
-    // Populate metadata for all file entries
+    // Populate metadata for all file entries (Git-tracked)
+    let mut tracked_paths: BTreeSet<String> = BTreeSet::new();
     for (path, oid) in entries {
         let inode_id = metadata.next_inode_id()?;
+        let path_str = path.to_string_lossy().to_string();
+        tracked_paths.insert(path_str.clone());
 
         let size = git.read_blob(&oid)
             .map(|data| data.len() as u64)
             .unwrap_or(0);
 
         let inode_metadata = InodeMetadata {
-            path: path.to_string_lossy().to_string(),
+            path: path_str,
             git_oid: Some(oid),
             is_dir: false,
             size,
@@ -166,6 +170,53 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
         };
 
         metadata.put_inode(inode_id, &inode_metadata)?;
+    }
+
+    // Also scan for untracked files in the repo (for passthrough access)
+    // This allows tools like cargo to access Cargo.lock, node_modules, etc.
+    let untracked_files = scan_untracked_files(repo_path, &tracked_paths, &directories)?;
+    if !untracked_files.is_empty() {
+        println!("Found {} untracked files for passthrough", untracked_files.len());
+
+        // Add directory entries for untracked file parents
+        let mut untracked_dirs: BTreeSet<String> = BTreeSet::new();
+        for (path, _) in &untracked_files {
+            let mut current = path.as_path();
+            while let Some(parent) = current.parent() {
+                let parent_str = parent.to_string_lossy().to_string();
+                if parent_str.is_empty() {
+                    break;
+                }
+                if !directories.contains(&parent_str) {
+                    untracked_dirs.insert(parent_str);
+                }
+                current = parent;
+            }
+        }
+
+        for dir_path in &untracked_dirs {
+            let inode_id = metadata.next_inode_id()?;
+            let dir_metadata = InodeMetadata {
+                path: dir_path.clone(),
+                git_oid: None,
+                is_dir: true,
+                size: 0,
+                volatile: true,  // Mark as volatile since untracked
+            };
+            metadata.put_inode(inode_id, &dir_metadata)?;
+        }
+
+        for (path, size) in untracked_files {
+            let inode_id = metadata.next_inode_id()?;
+            let inode_metadata = InodeMetadata {
+                path: path.to_string_lossy().to_string(),
+                git_oid: None,  // No git oid - will use passthrough
+                is_dir: false,
+                size,
+                volatile: true,  // Mark as volatile since untracked
+            };
+            metadata.put_inode(inode_id, &inode_metadata)?;
+        }
     }
 
     println!("✓ VibeFS initialized successfully");
@@ -179,6 +230,67 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
     // Bootstrap agent documentation
     bootstrap_agent_docs(repo_path)?;
 
+    Ok(())
+}
+
+/// Scan for untracked files in the repository
+/// These will be accessible via passthrough read from the actual filesystem
+fn scan_untracked_files(
+    repo_path: &Path,
+    tracked_paths: &BTreeSet<String>,
+    tracked_dirs: &BTreeSet<String>,
+) -> Result<Vec<(std::path::PathBuf, u64)>> {
+    let mut untracked = Vec::new();
+    scan_directory_for_untracked(repo_path, repo_path, tracked_paths, tracked_dirs, &mut untracked)?;
+    Ok(untracked)
+}
+
+fn scan_directory_for_untracked(
+    base: &Path,
+    current: &Path,
+    tracked_paths: &BTreeSet<String>,
+    tracked_dirs: &BTreeSet<String>,
+    untracked: &mut Vec<(std::path::PathBuf, u64)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel_path = path.strip_prefix(base)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| path.clone());
+        let rel_str = rel_path.to_string_lossy().to_string();
+
+        // Skip .git and .vibe directories
+        if rel_str == ".git" || rel_str == ".vibe" || rel_str.starts_with(".git/") || rel_str.starts_with(".vibe/") {
+            continue;
+        }
+
+        // Skip macOS metadata
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("._") || name == ".DS_Store" {
+                continue;
+            }
+        }
+
+        if path.is_dir() {
+            // Skip commonly ignored directories (node_modules, target, etc.)
+            // but still allow access to files like Cargo.lock
+            if !is_commonly_ignored(&rel_str) {
+                scan_directory_for_untracked(base, &path, tracked_paths, tracked_dirs, untracked)?;
+            }
+        } else if path.is_file() {
+            // Only add if not already tracked by Git
+            if !tracked_paths.contains(&rel_str) {
+                // Skip commonly ignored files
+                if !is_commonly_ignored(&rel_str) {
+                    let size = std::fs::metadata(&path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    untracked.push((rel_path, size));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

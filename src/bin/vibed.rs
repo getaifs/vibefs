@@ -192,9 +192,10 @@ async fn handle_client(
                     match setup_session_resources(&session_dir, &mount_point) {
                         Ok(_) => {
                             let nfs = VibeNFS::new(
-                                state_guard.metadata.clone(), 
-                                state_guard.git.clone(), 
-                                session_dir.clone(), 
+                                state_guard.metadata.clone(),
+                                state_guard.git.clone(),
+                                session_dir.clone(),
+                                state_guard.repo_path.clone(),
                                 vibe_id.clone()
                             );
                             
