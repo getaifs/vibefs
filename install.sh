@@ -87,16 +87,31 @@ install_binary() {
     # Create install directory if it doesn't exist
     mkdir -p "$INSTALL_DIR"
 
-    # Install binary
-    info "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
+    # Install binaries
+    info "Installing to ${INSTALL_DIR}..."
     mv "$temp_dir/${BINARY_NAME}" "$INSTALL_DIR/${BINARY_NAME}"
     chmod +x "$INSTALL_DIR/${BINARY_NAME}"
+
+    # Install vibed daemon if present
+    if [ -f "$temp_dir/vibed" ]; then
+        mv "$temp_dir/vibed" "$INSTALL_DIR/vibed"
+        chmod +x "$INSTALL_DIR/vibed"
+        info "Installed vibed daemon"
+    fi
 
     # Install helper tools if present
     if [ -f "$temp_dir/mark_dirty" ]; then
         mv "$temp_dir/mark_dirty" "$INSTALL_DIR/mark_dirty"
         chmod +x "$INSTALL_DIR/mark_dirty"
         info "Installed mark_dirty helper"
+    fi
+
+    # Re-sign binaries on macOS to fix code signature after copy
+    if [ "$(uname -s)" = "Darwin" ]; then
+        info "Re-signing binaries for macOS..."
+        codesign -s - --force "$INSTALL_DIR/${BINARY_NAME}" 2>/dev/null || true
+        [ -f "$INSTALL_DIR/vibed" ] && codesign -s - --force "$INSTALL_DIR/vibed" 2>/dev/null || true
+        [ -f "$INSTALL_DIR/mark_dirty" ] && codesign -s - --force "$INSTALL_DIR/mark_dirty" 2>/dev/null || true
     fi
 }
 
