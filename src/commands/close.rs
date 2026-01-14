@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::daemon_client::DaemonClient;
 use crate::daemon_ipc::DaemonResponse;
+use crate::platform;
 
 /// Close a single session, unmounting and cleaning up its data
 pub async fn close<P: AsRef<Path>>(
@@ -79,20 +80,12 @@ pub async fn close<P: AsRef<Path>>(
         .unwrap_or_else(|| "repo".to_string());
 
     // Force unmount the mount point - try both new and legacy formats
+    let mounts_dir = platform::get_vibe_mounts_dir();
     let mount_points = vec![
         // New format: repo_name-session_id
-        std::path::PathBuf::from(format!(
-            "{}/Library/Caches/vibe/mounts/{}-{}",
-            std::env::var("HOME").unwrap_or_default(),
-            repo_name,
-            session_id
-        )),
+        mounts_dir.join(format!("{}-{}", repo_name, session_id)),
         // Legacy format: just session_id
-        std::path::PathBuf::from(format!(
-            "{}/Library/Caches/vibe/mounts/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            session_id
-        )),
+        mounts_dir.join(session_id),
     ];
 
     for mount_point in mount_points {

@@ -55,8 +55,15 @@ pub async fn promote<P: AsRef<Path>>(
         .context("Failed to open Git repository")?;
 
     // Get dirty paths (modified files)
-    let all_dirty_paths = metadata.get_dirty_paths()
+    // Try to get from metadata first, but if empty, scan session directory
+    let mut all_dirty_paths = metadata.get_dirty_paths()
         .context("Failed to get dirty paths")?;
+
+    // If no dirty paths found in metadata, scan session directory for changes
+    // This handles the case where the daemon has the DB locked
+    if all_dirty_paths.is_empty() {
+        all_dirty_paths = scan_session_directory(&session_dir)?;
+    }
 
     // Filter by --only patterns if provided
     let dirty_paths: Vec<String> = if let Some(ref patterns) = only_paths {
@@ -173,7 +180,44 @@ pub async fn promote<P: AsRef<Path>>(
     println!("✓ Vibe session promoted successfully");
     println!("  Reference: {}", ref_name);
     println!("  Commit: {}", commit_oid);
-    println!("\nTo merge into main, run: vibe commit {}", vibe_id);
+    println!("\nTo merge into main, run: git merge {}", ref_name);
+
+    Ok(())
+}
+
+/// Scan session directory for files (when daemon has DB locked)
+fn scan_session_directory(session_dir: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    scan_directory_recursive(session_dir, session_dir, &mut files)?;
+    Ok(files)
+}
+
+fn scan_directory_recursive(base: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
+    if !current.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip hidden files and macOS metadata files
+        if let Some(name) = path.file_name() {
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') || name_str.starts_with("._") || name_str == ".DS_Store" {
+                continue;
+            }
+        }
+
+        if path.is_dir() {
+            scan_directory_recursive(base, &path, files)?;
+        } else if path.is_file() {
+            // Get relative path from session dir
+            if let Ok(rel) = path.strip_prefix(base) {
+                files.push(rel.display().to_string());
+            }
+        }
+    }
 
     Ok(())
 }

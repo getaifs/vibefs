@@ -28,3 +28,4 @@ Cargo.lock
 # Debug
 debug/
 *.dSYM/
+env.local.md

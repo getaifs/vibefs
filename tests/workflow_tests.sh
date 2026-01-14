@@ -13,8 +13,17 @@ NC='\033[0m' # No Color
 
 # Test directory
 TEST_DIR="/tmp/vibefs_workflow_tests"
-VIBE_BIN="/Users/x/src/vibefs/target/release/vibe"
-MARK_DIRTY_BIN="/Users/x/src/vibefs/target/release/mark_dirty"
+
+# Detect platform-specific paths
+if [ -d "/Users" ]; then
+    # macOS
+    VIBE_BIN="/Users/x/src/vibefs/target/release/vibe"
+    MARK_DIRTY_BIN="/Users/x/src/vibefs/target/release/mark_dirty"
+else
+    # Linux
+    VIBE_BIN="/home/x/src/vibefs/target/release/vibe"
+    MARK_DIRTY_BIN="/home/x/src/vibefs/target/release/mark_dirty"
+fi
 
 # Results tracking
 PASSED_COUNT=0

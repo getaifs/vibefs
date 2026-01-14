@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::io::Write;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 
 use crate::daemon_client::DaemonClient;
 use crate::daemon_ipc::get_pid_path;
+use crate::platform;
 
 pub async fn purge<P: AsRef<Path>>(repo_path: P, force: bool) -> Result<()> {
     let repo_path = repo_path.as_ref();
@@ -84,19 +85,12 @@ pub async fn purge<P: AsRef<Path>>(repo_path: P, force: bool) -> Result<()> {
                         let vibe_id_str = vibe_id.to_string_lossy();
 
                         // Try both old format (just vibe_id) and new format (repo_name-vibe_id)
+                        let mounts_dir = platform::get_vibe_mounts_dir();
                         let mount_points = vec![
-                            PathBuf::from(format!(
-                                "{}/Library/Caches/vibe/mounts/{}-{}",
-                                std::env::var("HOME").unwrap_or_default(),
-                                repo_name,
-                                vibe_id_str
-                            )),
+                            // New format: repo_name-vibe_id
+                            mounts_dir.join(format!("{}-{}", repo_name, vibe_id_str)),
                             // Legacy format for backwards compatibility
-                            PathBuf::from(format!(
-                                "{}/Library/Caches/vibe/mounts/{}",
-                                std::env::var("HOME").unwrap_or_default(),
-                                vibe_id_str
-                            )),
+                            mounts_dir.join(vibe_id_str.to_string()),
                         ];
 
                         for mount_point in mount_points {

@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, RwLock};
 use vibefs::db::MetadataStore;
 use vibefs::git::GitRepo;
 use vibefs::nfs::VibeNFS;
+use vibefs::platform;
 use vibefs::VERSION;
 
 /// Default idle timeout: 20 minutes
@@ -184,13 +185,9 @@ async fn handle_client(
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "repo".to_string());
 
-                    // Mount point format: ~/Library/Caches/vibe/mounts/<repo_name>-<vibe_id>
-                    let mount_point = PathBuf::from(format!(
-                        "{}/Library/Caches/vibe/mounts/{}-{}",
-                        std::env::var("HOME").unwrap_or_default(),
-                        repo_name,
-                        vibe_id
-                    ));
+                    // Mount point format: <platform-specific-cache>/vibe/mounts/<repo_name>-<vibe_id>
+                    let mount_point = platform::get_vibe_mounts_dir()
+                        .join(format!("{}-{}", repo_name, vibe_id));
 
                     match setup_session_resources(&session_dir, &mount_point) {
                         Ok(_) => {

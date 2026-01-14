@@ -6,6 +6,7 @@ pub mod tui;
 pub mod commands;
 pub mod cwd_validation;
 pub mod daemon_client;
+pub mod platform;
 
 /// Package version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

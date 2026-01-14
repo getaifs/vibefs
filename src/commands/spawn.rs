@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::cwd_validation;
 use crate::daemon_client::{ensure_daemon_running, DaemonClient};
 use crate::daemon_ipc::DaemonResponse;
 use crate::git::GitRepo;
+use crate::platform;
 
 /// Spawn a new vibe workspace
 pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
@@ -58,19 +58,18 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
             let info_json = serde_json::to_string_pretty(&spawn_info)?;
             std::fs::write(&info_path, info_json)?;
 
-            // Attempt to mount using sudo-less NFS mount
-            println!("\n  Attempting NFS mount...");
-            match mount_nfs(&mount_point, nfs_port) {
+            // Try to mount NFS (works automatically on macOS, requires manual step on Linux)
+            println!("\n  NFS server running on port {}", nfs_port);
+            match platform::mount_nfs(&mount_point, nfs_port) {
                 Ok(_) => {
-                    println!("✓ Vibe workspace mounted at: {}", mount_point);
+                    println!("  ✓ NFS mounted at: {}", mount_point);
                 }
                 Err(e) => {
-                    println!("⚠ Auto-mount failed: {}", e);
-                    println!("\n  To mount manually, run:");
-                    println!(
-                        "  mount_nfs -o vers=3,tcp,port={},mountport={},noresvport,nolock,locallocks localhost:/ {}",
-                        nfs_port, nfs_port, mount_point
-                    );
+                    // NFS mounting failed - provide instructions but don't fail
+                    println!("  ℹ NFS mount requires manual setup:");
+                    println!("    {}", e);
+                    println!("\n  Or work directly in session directory:");
+                    println!("    {}", vibe_dir.join("sessions").join(&vibe_id).display());
                 }
             }
 
@@ -89,78 +88,15 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
 
 /// Mount NFS share without sudo (using high port and user-space mount)
 /// This function handles stale mounts by unmounting first.
+/// Now uses the platform-specific implementation.
 pub fn mount_nfs(mount_point: &str, port: u16) -> Result<()> {
-    // Create mount point if it doesn't exist
-    std::fs::create_dir_all(mount_point)?;
-
-    // Check if already mounted - unmount stale mounts first
-    let mount_output = Command::new("mount")
-        .output()
-        .context("Failed to check mounts")?;
-
-    let mount_list = String::from_utf8_lossy(&mount_output.stdout);
-    let is_mounted = mount_list.lines().any(|line| line.contains(mount_point));
-
-    if is_mounted {
-        // Try to unmount existing (possibly stale) mount
-        // Use diskutil on macOS for more reliable unmount
-        let _ = Command::new("diskutil")
-            .args(["unmount", "force", mount_point])
-            .output();
-
-        // Give it a moment
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    // macOS mount_nfs options for user-space mounting
-    // -o noresvport: Use non-reserved ports (allows non-root mount on macOS)
-    // -o vers=3: Use NFSv3 (nfsserve is v3)
-    // -o tcp: Use TCP transport
-    // -o port=<port>: Connect to specified port
-    // -o mountport=<port>: Use same port for MOUNT protocol (nfsserve multiplexes)
-    // -o nolock,locallocks: Disable NFS locking (we handle it ourselves)
-    let output = Command::new("mount_nfs")
-        .args([
-            "-o",
-            &format!(
-                "vers=3,tcp,port={},mountport={},noresvport,nolock,locallocks,noacl,soft,retrans=2,timeo=5",
-                port, port
-            ),
-            &format!("localhost:/"),
-            mount_point,
-        ])
-        .output()
-        .context("Failed to execute mount_nfs")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("mount_nfs failed: {}", stderr);
-    }
-
-    Ok(())
+    platform::mount_nfs(mount_point, port)
 }
 
 /// Unmount NFS share
+/// Now uses the platform-specific implementation.
 pub fn unmount_nfs(mount_point: &str) -> Result<()> {
-    let output = Command::new("umount")
-        .arg(mount_point)
-        .output()
-        .context("Failed to execute umount")?;
-
-    if !output.status.success() {
-        // Try force unmount
-        let output = Command::new("umount")
-            .args(["-f", mount_point])
-            .output()
-            .context("Failed to execute umount -f")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("umount failed: {}", stderr);
-        }
-    }
-
-    Ok(())
+    platform::unmount_nfs_sync(mount_point)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
