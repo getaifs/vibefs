@@ -18,11 +18,9 @@ cargo build --release
 **Features**:
 - Detects platform automatically (macOS/Linux)
 - Installs to `~/.local/bin/` (vibe, vibed, mark_dirty)
+- Re-signs binaries on macOS (required to prevent SIGKILL after copy)
 - Detects distrobox containers and installs to host system
 - Uses repo root detection (portable across developers)
-
-### `install_mac.sh`
-Legacy macOS-specific installation script. Consider using `install.sh` instead.
 
 ## Testing Scripts
 

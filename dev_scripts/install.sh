@@ -86,6 +86,14 @@ else
     cp "$MARK_DIRTY_BIN" "$INSTALL_DIR/mark_dirty"
     chmod +x "$INSTALL_DIR/vibe" "$INSTALL_DIR/vibed" "$INSTALL_DIR/mark_dirty"
 
+    # Re-sign binaries on macOS (required after copy, prevents SIGKILL)
+    if [ "$PLATFORM" = "macos" ]; then
+        echo "Re-signing binaries for macOS..."
+        codesign -s - --force "$INSTALL_DIR/vibe"
+        codesign -s - --force "$INSTALL_DIR/vibed"
+        codesign -s - --force "$INSTALL_DIR/mark_dirty"
+    fi
+
     echo -e "${GREEN}✓${NC} Installed: $INSTALL_DIR/vibe"
     echo -e "${GREEN}✓${NC} Installed: $INSTALL_DIR/vibed"
     echo -e "${GREEN}✓${NC} Installed: $INSTALL_DIR/mark_dirty"
