@@ -42,6 +42,12 @@ cp target/release/vibed "${INSTALL_DIR}/"
 chmod +x "${INSTALL_DIR}/vibe"
 chmod +x "${INSTALL_DIR}/vibed"
 
+# Re-sign binaries to fix code signature after copy
+# (macOS invalidates signatures on copy, causing SIGKILL)
+echo "Re-signing binaries for macOS..."
+codesign -s - --force "${INSTALL_DIR}/vibe"
+codesign -s - --force "${INSTALL_DIR}/vibed"
+
 # Check if INSTALL_DIR is in PATH
 if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
     echo ""
