@@ -34,27 +34,28 @@ This architecture allows agents to work independently without conflicts, while c
 
 ## Installation
 
-### macOS (Development)
-
 ```bash
 # Clone and build
 git clone https://github.com/getaifs/vibefs.git
 cd vibefs
 cargo build --release
 
-# Install (includes code signing for macOS)
-./dev_scripts/install_mac.sh
+# Install (cross-platform, handles macOS code signing)
+./dev_scripts/install.sh
 ```
 
-### Linux
+### System Dependencies
 
+**macOS**: Xcode Command Line Tools (`xcode-select --install`)
+
+**Linux (Fedora)**:
 ```bash
-# Install system dependencies (Fedora example)
 sudo dnf install gcc-c++ clang-devel rocksdb-devel
+```
 
-# Build and install
-cargo build --release
-cp target/release/vibe target/release/vibed ~/.local/bin/
+**Linux (Ubuntu/Debian)**:
+```bash
+sudo apt install build-essential libclang-dev librocksdb-dev
 ```
 
 ## Quick Start

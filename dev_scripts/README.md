@@ -32,6 +32,15 @@ cargo test
 
 This runs all unit and integration tests (58 tests total).
 
+## Fedora/RHEL Notes
+
+On Fedora with system RocksDB, you may need to set:
+
+```bash
+ROCKSDB_LIB_DIR=/usr/lib64 cargo build --release
+ROCKSDB_LIB_DIR=/usr/lib64 cargo test
+```
+
 ## Platform Differences
 
 ### macOS vs Linux
