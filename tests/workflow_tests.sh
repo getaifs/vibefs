@@ -11,19 +11,16 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Detect script directory and repo root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Test directory
 TEST_DIR="/tmp/vibefs_workflow_tests"
 
-# Detect platform-specific paths
-if [ -d "/Users" ]; then
-    # macOS
-    VIBE_BIN="/Users/x/src/vibefs/target/release/vibe"
-    MARK_DIRTY_BIN="/Users/x/src/vibefs/target/release/mark_dirty"
-else
-    # Linux
-    VIBE_BIN="/home/x/src/vibefs/target/release/vibe"
-    MARK_DIRTY_BIN="/home/x/src/vibefs/target/release/mark_dirty"
-fi
+# Binary paths relative to repo root
+VIBE_BIN="$REPO_ROOT/target/release/vibe"
+MARK_DIRTY_BIN="$REPO_ROOT/target/release/mark_dirty"
 
 # Results tracking
 PASSED_COUNT=0

@@ -4,14 +4,25 @@ This directory contains development and testing scripts for VibeFS.
 
 ## Installation Scripts
 
-### `install_mac.sh`
-Builds and installs VibeFS locally on macOS.
+### `install.sh`
+Installs pre-built VibeFS binaries to the host system (cross-platform).
 
 ```bash
-./dev_scripts/install_mac.sh
+# Build first
+cargo build --release
+
+# Then install
+./dev_scripts/install.sh
 ```
 
-Installs to `~/.local/bin/` and creates cache directories.
+**Features**:
+- Detects platform automatically (macOS/Linux)
+- Installs to `~/.local/bin/` (vibe, vibed, mark_dirty)
+- Detects distrobox containers and installs to host system
+- Uses repo root detection (portable across developers)
+
+### `install_mac.sh`
+Legacy macOS-specific installation script. Consider using `install.sh` instead.
 
 ## Testing Scripts
 
