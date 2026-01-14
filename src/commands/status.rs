@@ -76,7 +76,7 @@ async fn show_overview<P: AsRef<Path>>(repo_path: P, json_output: bool) -> Resul
                 // Get dirty counts for each session
                 let db_path = vibe_dir.join("metadata.db");
                 let dirty_counts = if db_path.exists() {
-                    if let Ok(store) = MetadataStore::open(&db_path) {
+                    if let Ok(store) = MetadataStore::open_readonly(&db_path) {
                         get_dirty_counts_by_session(&store, repo_path)
                     } else {
                         HashMap::new()
@@ -138,11 +138,13 @@ async fn show_session_details<P: AsRef<Path>>(
     // Load session info
     let spawn_info = SpawnInfo::load(repo_path, session_id)?;
 
-    // Get dirty files
+    // Get dirty files (read-only to avoid lock conflicts with daemon)
     let db_path = vibe_dir.join("metadata.db");
     let dirty_files = if db_path.exists() {
-        let store = MetadataStore::open(&db_path)?;
-        store.get_dirty_paths()?
+        match MetadataStore::open_readonly(&db_path) {
+            Ok(store) => store.get_dirty_paths()?,
+            Err(_) => Vec::new(), // Fallback if read-only fails
+        }
     } else {
         Vec::new()
     };
@@ -203,7 +205,8 @@ async fn show_conflicts_status<P: AsRef<Path>>(repo_path: P, json_output: bool) 
         return Ok(());
     }
 
-    let store = MetadataStore::open(&db_path)?;
+    let store = MetadataStore::open_readonly(&db_path)
+        .map_err(|_| anyhow::anyhow!("Cannot open metadata store"))?;
     let dirty_paths = store.get_dirty_paths()?;
 
     // Get all sessions

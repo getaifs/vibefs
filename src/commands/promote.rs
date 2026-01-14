@@ -29,10 +29,10 @@ pub async fn promote<P: AsRef<Path>>(
 
     println!("Promoting vibe session: {}", vibe_id);
 
-    // Open metadata store
+    // Open metadata store (read-only to avoid lock conflicts with daemon)
     let metadata_path = vibe_dir.join("metadata.db");
-    let metadata = MetadataStore::open(&metadata_path)
-        .context("Failed to open metadata store")?;
+    let metadata = MetadataStore::open_readonly(&metadata_path)
+        .context("Failed to open metadata store. Is the daemon running?")?;
 
     // Open Git repository
     let git = GitRepo::open(repo_path)

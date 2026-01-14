@@ -33,9 +33,10 @@ pub async fn diff<P: AsRef<Path>>(
         )
     })?;
 
-    // Open metadata store to get dirty files
+    // Open metadata store to get dirty files (read-only to avoid lock conflicts with daemon)
     let db_path = vibe_dir.join("metadata.db");
-    let store = MetadataStore::open(&db_path)?;
+    let store = MetadataStore::open_readonly(&db_path)
+        .context("Failed to open metadata store. Is another vibe command running?")?;
     let dirty_paths = store.get_dirty_paths()?;
 
     if dirty_paths.is_empty() {

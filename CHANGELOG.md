@@ -15,6 +15,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.5.2] - 2026-01-14
+
+### Fixed
+- **RocksDB lock contention**: CLI commands (inspect, diff, status, promote) now use read-only mode to avoid lock conflicts with daemon
+  - `vibe inspect`, `vibe diff`, `vibe status` work while daemon is running
+  - `vibe promote` reads dirty paths in read-only mode
+  - `vibe restore` provides helpful error message (requires daemon stop for write access)
+- **Launch wrong directory**: `vibe launch` now correctly uses actual NFS mount point from SpawnInfo instead of hardcoded `/tmp/vibe/<session>` path
+- **Test suite improvements**: Workflow test for restore now correctly stops daemon before restore operation
+
+### Documentation
+- Updated bug report files with fix resolutions
+- Marked bug_v0.5.5 (daemon /tmp issue) as resolved - was stale binaries, not code bug
+- Marked bug_v0.5.6 (RocksDB lock) as fixed
+- Marked bug_v0.5.7 (daemon stop global) as NOT A BUG - daemon is correctly per-repo
+- Marked bug_v0.5.8 (launch wrong directory) as fixed
+
+## [0.5.1] - 2026-01-13
+
+### Fixed
+- NFS folder structure now correctly shows hierarchical directory structure instead of flat file list
+
 ## [0.2.9] - 2026-01-12
 
 ### Added
@@ -79,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dirty file tracking requires manual marking
 - Requires RocksDB system library
 
-[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/getaifs/vibefs/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/getaifs/vibefs/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/getaifs/vibefs/compare/v0.2.9...v0.5.1
 [0.2.9]: https://github.com/getaifs/vibefs/compare/v0.1.0...v0.2.9
 [0.1.0]: https://github.com/getaifs/vibefs/releases/tag/v0.1.0

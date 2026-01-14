@@ -88,7 +88,8 @@ pub async fn restore<P: AsRef<Path>>(
     let db_path = vibe_dir.join("metadata.db");
     if db_path.exists() {
         println!("  Updating dirty file tracking...");
-        let store = MetadataStore::open(&db_path)?;
+        let store = MetadataStore::open(&db_path)
+            .context("Failed to open metadata store. If daemon is running, stop it first with 'vibe daemon stop'")?;
 
         // Clear existing dirty markers
         store.clear_dirty()?;

@@ -1,10 +1,10 @@
 //! `vibe launch <agent>` command - Spawn session and exec agent
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 
-use crate::commands::spawn;
+use crate::commands::spawn::{self, SpawnInfo};
 use crate::names;
 
 /// Known agent binaries for "did you mean" suggestions
@@ -37,10 +37,13 @@ pub async fn launch<P: AsRef<Path>>(
     // Spawn the session
     spawn::spawn(repo_path, &session).await?;
 
-    // Get mount point
-    let mount_point = format!("/tmp/vibe/{}", session);
+    // Load spawn info to get the actual mount point
+    let spawn_info = SpawnInfo::load(repo_path, &session)
+        .with_context(|| "Failed to load session info after spawn")?;
 
-    println!("Executing {} in {}", agent, mount_point);
+    let mount_point = spawn_info.mount_point;
+
+    println!("Executing {} in {}", agent, mount_point.display());
 
     // exec the agent - this replaces the current process
     let err = std::process::Command::new(&agent_path)

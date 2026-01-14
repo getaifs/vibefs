@@ -21,11 +21,16 @@ pub async fn inspect<P: AsRef<Path>>(
     let spawn_info = SpawnInfo::load(repo_path, session)
         .with_context(|| format!("Session '{}' not found. Run 'vibe status' to see active sessions.", session))?;
 
-    // Get dirty files
+    // Get dirty files (use read-only mode to avoid lock conflicts with daemon)
     let db_path = vibe_dir.join("metadata.db");
     let dirty_files = if db_path.exists() {
-        let store = MetadataStore::open(&db_path)?;
-        store.get_dirty_paths()?
+        match MetadataStore::open_readonly(&db_path) {
+            Ok(store) => store.get_dirty_paths()?,
+            Err(_) => {
+                // Fallback: if read-only fails, return empty list
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
