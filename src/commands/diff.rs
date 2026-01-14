@@ -25,13 +25,24 @@ pub async fn diff<P: AsRef<Path>>(
         .with_context(|| format!("Session '{}' not found. Run 'vibe status' to see active sessions.", session))?;
 
     // Get spawn commit
-    let spawn_commit = spawn_info.spawn_commit.ok_or_else(|| {
+    let spawn_commit = spawn_info.spawn_commit.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "Session '{}' has no spawn commit recorded. Cannot compute diff.\n\
              This may be a session created with an older version of VibeFS.",
             session
         )
     })?;
+
+    // Check if session is behind HEAD
+    let git_repo = GitRepo::open(repo_path)?;
+    if let Ok(head_commit) = git_repo.head_commit() {
+        if spawn_commit != head_commit {
+            eprintln!("⚠ Note: Session '{}' is based on {} but HEAD is at {}",
+                session, &spawn_commit[..7.min(spawn_commit.len())], &head_commit[..7.min(head_commit.len())]);
+            eprintln!("  Diff shows changes against session base, not current HEAD.");
+            eprintln!("  Run 'vibe rebase {}' to update if needed.\n", session);
+        }
+    }
 
     // Open metadata store to get dirty files (read-only to avoid lock conflicts with daemon)
     let db_path = vibe_dir.join("metadata.db");
@@ -45,7 +56,6 @@ pub async fn diff<P: AsRef<Path>>(
     }
 
     // Build the diff output
-    let git_repo = GitRepo::open(repo_path)?;
     let session_dir = spawn_info.session_dir;
 
     let mut diff_output = String::new();

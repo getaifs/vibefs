@@ -63,6 +63,16 @@ enum Commands {
         no_backup: bool,
     },
 
+    /// Rebase session to current HEAD (update base commit)
+    Rebase {
+        /// Session to rebase
+        session: String,
+
+        /// Force rebase even if there are potential conflicts
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Promote a vibe session into a Git commit
     Promote {
         /// Session to promote (required unless --all is used)
@@ -224,6 +234,9 @@ async fn main() -> Result<()> {
         }
         Commands::Restore { session, snapshot, no_backup } => {
             commands::restore::restore(&repo_path, &session, &snapshot, no_backup).await?;
+        }
+        Commands::Rebase { session, force } => {
+            commands::rebase::rebase(&repo_path, &session, force).await?;
         }
         Commands::Promote { session, all, only, message } => {
             if all {

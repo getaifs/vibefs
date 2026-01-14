@@ -9,6 +9,7 @@ use crate::commands::spawn::SpawnInfo;
 use crate::daemon_client::DaemonClient;
 use crate::daemon_ipc::{self, DaemonResponse};
 use crate::db::MetadataStore;
+use crate::git::GitRepo;
 
 /// Show status - overview, per-session details, or conflicts
 pub async fn status<P: AsRef<Path>>(
@@ -45,11 +46,17 @@ async fn show_overview<P: AsRef<Path>>(repo_path: P, json_output: bool) -> Resul
     let repo_path = repo_path.as_ref();
     let vibe_dir = repo_path.join(".vibe");
 
+    // Get current HEAD commit
+    let head_commit = GitRepo::open(repo_path)
+        .ok()
+        .and_then(|git| git.head_commit().ok());
+
     let mut output = StatusOverview {
         daemon_running: false,
         daemon_pid: None,
         daemon_uptime_secs: None,
         nfs_port: None,
+        head_commit: head_commit.clone(),
         active_sessions: Vec::new(),
         offline_sessions: Vec::new(),
     };
@@ -86,11 +93,21 @@ async fn show_overview<P: AsRef<Path>>(repo_path: P, json_output: bool) -> Resul
                 };
 
                 for sess in sessions {
+                    // Load spawn info to get base commit
+                    let spawn_info = SpawnInfo::load(repo_path, &sess.vibe_id).ok();
+                    let base_commit = spawn_info.as_ref().and_then(|s| s.spawn_commit.clone());
+                    let behind_head = match (&base_commit, &head_commit) {
+                        (Some(base), Some(head)) => Some(base != head),
+                        _ => None,
+                    };
+
                     output.active_sessions.push(SessionSummary {
                         id: sess.vibe_id.clone(),
                         dirty_count: dirty_counts.get(&sess.vibe_id).copied().unwrap_or(0),
                         uptime_secs: sess.uptime_secs,
                         mount_point: sess.mount_point,
+                        base_commit,
+                        behind_head,
                     });
                 }
             }
@@ -138,6 +155,17 @@ async fn show_session_details<P: AsRef<Path>>(
     // Load session info
     let spawn_info = SpawnInfo::load(repo_path, session_id)?;
 
+    // Get current HEAD
+    let head_commit = GitRepo::open(repo_path)
+        .ok()
+        .and_then(|git| git.head_commit().ok());
+
+    // Check if behind HEAD
+    let behind_head = match (&spawn_info.spawn_commit, &head_commit) {
+        (Some(base), Some(head)) => Some(base != head),
+        _ => None,
+    };
+
     // Get dirty files (read-only to avoid lock conflicts with daemon)
     let db_path = vibe_dir.join("metadata.db");
     let dirty_files = if db_path.exists() {
@@ -175,6 +203,8 @@ async fn show_session_details<P: AsRef<Path>>(
         mount_point: spawn_info.mount_point.to_string_lossy().to_string(),
         uptime_secs,
         spawn_commit: spawn_info.spawn_commit.clone(),
+        head_commit,
+        behind_head,
         created_at: spawn_info.created_at.clone(),
         dirty_count: dirty_files.len(),
         dirty_files: dirty_files.clone(),
@@ -302,6 +332,7 @@ struct StatusOverview {
     daemon_pid: Option<u32>,
     daemon_uptime_secs: Option<u64>,
     nfs_port: Option<u16>,
+    head_commit: Option<String>,
     active_sessions: Vec<SessionSummary>,
     offline_sessions: Vec<String>,
 }
@@ -312,6 +343,9 @@ struct SessionSummary {
     dirty_count: usize,
     uptime_secs: u64,
     mount_point: String,
+    base_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behind_head: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -320,6 +354,9 @@ struct SessionDetails {
     mount_point: String,
     uptime_secs: Option<u64>,
     spawn_commit: Option<String>,
+    head_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behind_head: Option<bool>,
     created_at: Option<String>,
     dirty_count: usize,
     dirty_files: Vec<String>,
@@ -341,6 +378,11 @@ fn print_overview(output: &StatusOverview, repo_path: &Path) {
     println!("VibeFS Status for: {}", repo_path.display());
     println!("================================================================================");
 
+    // Show HEAD commit
+    if let Some(ref head) = output.head_commit {
+        println!("HEAD: {}", &head[..12.min(head.len())]);
+    }
+
     if output.daemon_running {
         print!("DAEMON: RUNNING");
         if let Some(pid) = output.daemon_pid {
@@ -358,16 +400,33 @@ fn print_overview(output: &StatusOverview, repo_path: &Path) {
 
         if !output.active_sessions.is_empty() {
             println!("\nACTIVE SESSIONS:");
-            println!("  {:<20} {:<8} {:<12} {:<40}", "SESSION", "DIRTY", "UPTIME", "MOUNT");
-            println!("  {:-<20} {:-<8} {:-<12} {:-<40}", "", "", "", "");
+            println!("  {:<20} {:<8} {:<12} {:<10} {}", "SESSION", "DIRTY", "UPTIME", "BASE", "STATUS");
+            println!("  {:-<20} {:-<8} {:-<12} {:-<10} {:-<10}", "", "", "", "", "");
             for sess in &output.active_sessions {
+                let base_short = sess.base_commit.as_ref()
+                    .map(|c| &c[..7.min(c.len())])
+                    .unwrap_or("unknown");
+                let status = match sess.behind_head {
+                    Some(true) => "⚠ BEHIND",
+                    Some(false) => "✓ synced",
+                    None => "-",
+                };
                 println!(
-                    "  {:<20} {:<8} {:<12} {:<40}",
+                    "  {:<20} {:<8} {:<12} {:<10} {}",
                     sess.id,
                     sess.dirty_count,
                     format_uptime(sess.uptime_secs),
-                    sess.mount_point
+                    base_short,
+                    status
                 );
+            }
+
+            // Show warning if any sessions are behind
+            let behind_count = output.active_sessions.iter()
+                .filter(|s| s.behind_head == Some(true))
+                .count();
+            if behind_count > 0 {
+                println!("\n⚠ {} session(s) behind HEAD. Run 'vibe rebase <session>' to update.", behind_count);
             }
         }
     } else {
@@ -390,9 +449,23 @@ fn print_session_details(output: &SessionDetails) {
     if let Some(uptime) = output.uptime_secs {
         println!("  Uptime:    {}", format_uptime(uptime));
     }
+
+    // Show base commit and HEAD comparison
     if let Some(ref commit) = output.spawn_commit {
-        println!("  Base:      {} ", &commit[..12.min(commit.len())]);
+        let status = match output.behind_head {
+            Some(true) => " ⚠ BEHIND HEAD",
+            Some(false) => " ✓ synced",
+            None => "",
+        };
+        println!("  Base:      {}{}", &commit[..12.min(commit.len())], status);
     }
+    if let Some(ref head) = output.head_commit {
+        if output.behind_head == Some(true) {
+            println!("  HEAD:      {}", &head[..12.min(head.len())]);
+            println!("\n⚠ Session is behind HEAD. Run 'vibe rebase {}' to update.", output.id);
+        }
+    }
+
     println!("  Dirty:     {} files", output.dirty_count);
     if !output.snapshots.is_empty() {
         println!("  Snapshots: {}", output.snapshots.join(", "));

@@ -8,6 +8,13 @@ use crate::commands::spawn::SpawnInfo;
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
 
+/// Get HEAD commit for comparison
+fn get_head_commit(repo_path: &Path) -> Option<String> {
+    GitRepo::open(repo_path)
+        .ok()
+        .and_then(|git| git.head_commit().ok())
+}
+
 /// Dump session metadata for debugging
 pub async fn inspect<P: AsRef<Path>>(
     repo_path: P,
@@ -47,6 +54,13 @@ pub async fn inspect<P: AsRef<Path>>(
     let git_repo = GitRepo::open(repo_path)?;
     let phantom_exists = git_repo.get_ref(&phantom_ref)?.is_some();
 
+    // Get HEAD commit for comparison
+    let head_commit = get_head_commit(repo_path);
+    let behind_head = match (&spawn_info.spawn_commit, &head_commit) {
+        (Some(base), Some(head)) => Some(base != head),
+        _ => None,
+    };
+
     // Build output
     let output = InspectOutput {
         session_id: session.to_string(),
@@ -54,6 +68,8 @@ pub async fn inspect<P: AsRef<Path>>(
         mount_point: spawn_info.mount_point.to_string_lossy().to_string(),
         nfs_port: spawn_info.port,
         spawn_commit: spawn_info.spawn_commit.clone(),
+        head_commit,
+        behind_head,
         phantom_ref: if phantom_exists { Some(phantom_ref) } else { None },
         delta_path: spawn_info.session_dir.to_string_lossy().to_string(),
         delta_size_bytes: delta_size,
@@ -87,6 +103,9 @@ struct InspectOutput {
     mount_point: String,
     nfs_port: u16,
     spawn_commit: Option<String>,
+    head_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behind_head: Option<bool>,
     phantom_ref: Option<String>,
     delta_path: String,
     delta_size_bytes: u64,
@@ -117,14 +136,27 @@ fn print_human_readable(output: &InspectOutput) {
 
     println!("\nGit State:");
     if let Some(ref commit) = output.spawn_commit {
-        println!("  Base Commit:  {}", commit);
+        let status = match output.behind_head {
+            Some(true) => " ⚠ BEHIND HEAD",
+            Some(false) => " ✓ synced",
+            None => "",
+        };
+        println!("  Base Commit:  {}{}", commit, status);
     } else {
         println!("  Base Commit:  (unknown - old session format)");
+    }
+    if let Some(ref head) = output.head_commit {
+        if output.behind_head == Some(true) {
+            println!("  HEAD Commit:  {}", head);
+        }
     }
     if let Some(ref phantom) = output.phantom_ref {
         println!("  Phantom Ref:  {} (exists)", phantom);
     } else {
         println!("  Phantom Ref:  refs/vibes/{} (not yet promoted)", output.session_id);
+    }
+    if output.behind_head == Some(true) {
+        println!("\n⚠ Session is behind HEAD. Run 'vibe rebase {}' to update.", output.session_id);
     }
 
     println!("\nStorage:");

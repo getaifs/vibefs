@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
+use crate::commands::spawn::SpawnInfo;
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
 use crate::cwd_validation;
@@ -25,6 +26,21 @@ pub async fn promote<P: AsRef<Path>>(
 
     if !session_dir.exists() {
         anyhow::bail!("Vibe session '{}' does not exist", vibe_id);
+    }
+
+    // Check if session is behind HEAD
+    if let Ok(spawn_info) = SpawnInfo::load(repo_path, vibe_id) {
+        if let Some(ref base_commit) = spawn_info.spawn_commit {
+            let git = GitRepo::open(repo_path)?;
+            if let Ok(head_commit) = git.head_commit() {
+                if base_commit != &head_commit {
+                    eprintln!("⚠ WARNING: Session '{}' is based on {} but HEAD is at {}",
+                        vibe_id, &base_commit[..7.min(base_commit.len())], &head_commit[..7.min(head_commit.len())]);
+                    eprintln!("  The promoted commit will be based on HEAD, not your session's base commit.");
+                    eprintln!("  Consider running 'vibe rebase {}' first to update.\n", vibe_id);
+                }
+            }
+        }
     }
 
     println!("Promoting vibe session: {}", vibe_id);
