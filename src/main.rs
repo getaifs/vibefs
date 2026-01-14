@@ -28,14 +28,14 @@ enum Commands {
 
     /// Spawn a new vibe workspace
     Spawn {
-        /// Vibe ID for the new workspace (auto-generated if not provided)
-        vibe_id: Option<String>,
+        /// Session name for the new workspace (auto-generated if not provided)
+        session: Option<String>,
     },
 
     /// Create a zero-cost snapshot of a vibe session
     Snapshot {
-        /// Vibe ID to snapshot
-        vibe_id: String,
+        /// Session to snapshot
+        session: String,
     },
 
     /// Restore session state from a snapshot
@@ -54,8 +54,8 @@ enum Commands {
 
     /// Promote a vibe session into a Git commit
     Promote {
-        /// Vibe ID to promote (required unless --all is used)
-        vibe_id: Option<String>,
+        /// Session to promote (required unless --all is used)
+        session: Option<String>,
 
         /// Promote all sessions with dirty files
         #[arg(long)]
@@ -96,13 +96,17 @@ enum Commands {
     /// Execute a command in a vibe workspace
     #[command(name = "sh")]
     Shell {
-        /// Vibe ID for the workspace
+        /// Session name for the workspace
         #[arg(short, long, default_value = "default")]
         session: String,
 
         /// Command to execute
         #[arg(short, long)]
         command: Option<String>,
+
+        /// Create session if it doesn't exist (default: error if missing)
+        #[arg(long)]
+        create: bool,
     },
 
     /// Launch an agent in a new vibe session
@@ -163,12 +167,8 @@ enum Commands {
         json: bool,
     },
 
-    /// Clean up VibeFS data (all or specific session)
+    /// Clean up VibeFS data (all sessions, or use `vibe close` for specific session)
     Purge {
-        /// Specific session to purge (if not specified, purges all)
-        #[arg(short, long)]
-        session: Option<String>,
-
         /// Force purge without confirmation
         #[arg(short, long)]
         force: bool,
@@ -201,26 +201,26 @@ async fn main() -> Result<()> {
         Commands::Init => {
             commands::init::init(&repo_path).await?;
         }
-        Commands::Spawn { vibe_id } => {
-            let vibe_id = vibe_id.unwrap_or_else(|| {
+        Commands::Spawn { session } => {
+            let session = session.unwrap_or_else(|| {
                 let sessions_dir = repo_path.join(".vibe/sessions");
                 vibefs::names::generate_unique_name(&sessions_dir)
             });
-            commands::spawn::spawn(&repo_path, &vibe_id).await?;
+            commands::spawn::spawn(&repo_path, &session).await?;
         }
-        Commands::Snapshot { vibe_id } => {
-            commands::snapshot::snapshot(&repo_path, &vibe_id).await?;
+        Commands::Snapshot { session } => {
+            commands::snapshot::snapshot(&repo_path, &session).await?;
         }
         Commands::Restore { session, snapshot, no_backup } => {
             commands::restore::restore(&repo_path, &session, &snapshot, no_backup).await?;
         }
-        Commands::Promote { vibe_id, all, only, message } => {
+        Commands::Promote { session, all, only, message } => {
             if all {
                 commands::promote::promote_all(&repo_path, message.as_deref()).await?;
-            } else if let Some(id) = vibe_id {
+            } else if let Some(id) = session {
                 commands::promote::promote(&repo_path, &id, only, message.as_deref()).await?;
             } else {
-                anyhow::bail!("Either provide a session ID or use --all");
+                anyhow::bail!("Either provide a session name or use --all");
             }
         }
         Commands::Close { session, force, dirty } => {
@@ -283,13 +283,23 @@ async fn main() -> Result<()> {
         Commands::Dashboard => {
             tui::run_dashboard(&repo_path).await?;
         }
-        Commands::Shell { session, command } => {
-            // Ensure daemon is running and session exists
+        Commands::Shell { session, command, create } => {
+            // Check if session exists (unless --create is passed)
+            let session_dir = repo_path.join(".vibe/sessions").join(&session);
+            if !create && !session_dir.exists() {
+                anyhow::bail!(
+                    "Session '{}' does not exist.\n\
+                     Use 'vibe spawn {}' to create it, or use 'vibe sh --create -s {}'",
+                    session, session, session
+                );
+            }
+
+            // Ensure daemon is running
             daemon_client::ensure_daemon_running(&repo_path).await?;
 
             let mut client = DaemonClient::connect(&repo_path).await?;
 
-            // Export session if not exists
+            // Export session (creates if --create was passed)
             match client.export_session(&session).await? {
                 DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
                     // Ensure NFS is mounted (handles stale mounts from daemon restart)
@@ -376,14 +386,8 @@ async fn main() -> Result<()> {
         Commands::Status { session, conflicts, json } => {
             commands::status::status(&repo_path, session.as_deref(), conflicts, json).await?;
         }
-        Commands::Purge { session, force } => {
-            if let Some(session_id) = session {
-                // Close a specific session
-                commands::close::close(&repo_path, &session_id, force, false).await?;
-            } else {
-                // Purge all
-                commands::purge::purge(&repo_path, force).await?;
-            }
+        Commands::Purge { force } => {
+            commands::purge::purge(&repo_path, force).await?;
         }
     }
 
