@@ -291,7 +291,12 @@ async fn main() -> Result<()> {
 
             // Export session if not exists
             match client.export_session(&session).await? {
-                DaemonResponse::SessionExported { mount_point, .. } => {
+                DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
+                    // Ensure NFS is mounted (handles stale mounts from daemon restart)
+                    if let Err(e) = commands::spawn::mount_nfs(&mount_point, nfs_port) {
+                        eprintln!("Warning: mount issue: {}", e);
+                    }
+
                     if let Some(cmd) = command {
                         // Execute command in mount point
                         let status = std::process::Command::new("sh")

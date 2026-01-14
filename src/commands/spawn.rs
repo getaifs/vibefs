@@ -88,9 +88,29 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
 }
 
 /// Mount NFS share without sudo (using high port and user-space mount)
-fn mount_nfs(mount_point: &str, port: u16) -> Result<()> {
+/// This function handles stale mounts by unmounting first.
+pub fn mount_nfs(mount_point: &str, port: u16) -> Result<()> {
     // Create mount point if it doesn't exist
     std::fs::create_dir_all(mount_point)?;
+
+    // Check if already mounted - unmount stale mounts first
+    let mount_output = Command::new("mount")
+        .output()
+        .context("Failed to check mounts")?;
+
+    let mount_list = String::from_utf8_lossy(&mount_output.stdout);
+    let is_mounted = mount_list.lines().any(|line| line.contains(mount_point));
+
+    if is_mounted {
+        // Try to unmount existing (possibly stale) mount
+        // Use diskutil on macOS for more reliable unmount
+        let _ = Command::new("diskutil")
+            .args(["unmount", "force", mount_point])
+            .output();
+
+        // Give it a moment
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     // macOS mount_nfs options for user-space mounting
     // -o noresvport: Use non-reserved ports (allows non-root mount on macOS)
