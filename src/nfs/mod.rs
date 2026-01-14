@@ -5,8 +5,9 @@
 
 use anyhow::Result;
 use nfsserve::nfs::{
-    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfsstring, nfstime3, sattr3, specdata3,
+    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfsstring, nfstime3, sattr3, set_size3, specdata3,
 };
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -96,6 +97,47 @@ impl VibeNFS {
 
     async fn get_session_path(&self, path: &Path) -> PathBuf {
         self.session_dir.join(path)
+    }
+
+    /// Ensure a file exists in the session directory.
+    /// If the file doesn't exist, copies it from Git ODB or repo filesystem.
+    /// This is used before writes to ensure we have a local copy to modify.
+    async fn ensure_session_file(&self, metadata: &InodeMetadata, session_path: &Path) -> std::result::Result<(), nfsstat3> {
+        // Create parent directories if needed
+        if let Some(parent) = session_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        }
+
+        // If file already exists in session, nothing to do
+        if session_path.exists() {
+            return Ok(());
+        }
+
+        // Copy content from source (Git ODB or repo filesystem)
+        let content = if let Some(oid) = &metadata.git_oid {
+            // Read from Git ODB
+            let git = self.git.read().await;
+            git.read_blob(oid).map_err(|_| nfsstat3::NFS3ERR_IO)?
+        } else {
+            // Try repo filesystem (untracked file)
+            let repo_file = self.repo_path.join(&metadata.path);
+            if repo_file.exists() && repo_file.is_file() {
+                tokio::fs::read(&repo_file)
+                    .await
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            } else {
+                // New file - start empty
+                Vec::new()
+            }
+        };
+
+        tokio::fs::write(session_path, &content)
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        Ok(())
     }
 
     async fn get_metadata_by_inode(&self, inode: fileid3) -> Result<Option<InodeMetadata>> {
@@ -310,7 +352,56 @@ impl NFSFileSystem for VibeNFS {
         Ok(self.metadata_to_fattr(id, &metadata))
     }
 
-    async fn setattr(&self, id: fileid3, _setattr: sattr3) -> Result<fattr3, nfsstat3> {
+    async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
+        // Handle size change (truncation)
+        if let set_size3::size(new_size) = setattr.size {
+            let metadata = self
+                .get_metadata_by_inode(id)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?
+                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
+
+            if metadata.is_dir {
+                return Err(nfsstat3::NFS3ERR_ISDIR);
+            }
+
+            // Ensure file exists in session directory (copy from git if needed)
+            let session_path = self.get_session_path(Path::new(&metadata.path)).await;
+            self.ensure_session_file(&metadata, &session_path).await?;
+
+            // Truncate/extend the file to new size
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&session_path)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+            file.set_len(new_size)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+            // Mark as dirty and update metadata
+            if !Self::is_ignored_path(&metadata.path) {
+                let store = self.metadata.write().await;
+                store
+                    .mark_dirty(&metadata.path)
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                drop(store);
+            }
+
+            // Update size in metadata
+            let mut updated_metadata = metadata.clone();
+            updated_metadata.size = new_size;
+
+            let store = self.metadata.write().await;
+            store
+                .put_inode(id, &updated_metadata)
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            drop(store);
+
+            return Ok(self.metadata_to_fattr(id, &updated_metadata));
+        }
+
         self.getattr(id).await
     }
 
@@ -337,9 +428,17 @@ impl NFSFileSystem for VibeNFS {
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         drop(store);
 
+        // Session path for potential reads
+        let session_path = self.get_session_path(Path::new(&metadata.path)).await;
+
         let data = if is_dirty {
-            // Read from session directory
-            let session_path = self.get_session_path(Path::new(&metadata.path)).await;
+            // Dirty files are always read from session
+            tokio::fs::read(&session_path)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?
+        } else if session_path.exists() {
+            // File exists in session (e.g., newly created files that aren't marked dirty)
+            // This handles AppleDouble files and other session-created files
             tokio::fs::read(&session_path)
                 .await
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?
@@ -384,40 +483,37 @@ impl NFSFileSystem for VibeNFS {
 
         // Write to session directory
         let session_path = self.get_session_path(Path::new(&metadata.path)).await;
-        if let Some(parent) = session_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        }
 
-        // Read existing content if offset > 0
-        let mut existing = if offset > 0 && session_path.exists() {
-            tokio::fs::read(&session_path)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?
-        } else if offset > 0 && metadata.git_oid.is_some() {
-            let git = self.git.read().await;
-            git.read_blob(metadata.git_oid.as_ref().unwrap())
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?
-        } else {
-            Vec::new()
-        };
+        // Ensure file exists in session (copy from git if needed)
+        self.ensure_session_file(&metadata, &session_path).await?;
 
-        // Extend if necessary
-        if offset as usize > existing.len() {
-            existing.resize(offset as usize, 0);
-        }
-
-        // Write data at offset
-        let end = offset as usize + data.len();
-        if end > existing.len() {
-            existing.resize(end, 0);
-        }
-        existing[offset as usize..end].copy_from_slice(data);
-
-        tokio::fs::write(&session_path, &existing)
+        // Open file with read+write access for proper seeking
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&session_path)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        // Seek to offset and write data directly
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        file.write_all(data)
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        // Sync to ensure data is written
+        file.sync_all()
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+
+        // Get final file size
+        let file_metadata = file.metadata()
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let new_size = file_metadata.len();
 
         // Mark as dirty
         if !Self::is_ignored_path(&metadata.path) {
@@ -428,8 +524,7 @@ impl NFSFileSystem for VibeNFS {
             drop(store);
         }
 
-        // Update size
-        let new_size = existing.len() as u64;
+        // Update size in metadata
         let mut updated_metadata = metadata.clone();
         updated_metadata.size = new_size;
 
@@ -591,12 +686,19 @@ impl NFSFileSystem for VibeNFS {
         // Update directory cache
         self.remove_child_from_cache(dirid, inode).await;
 
-        // Remove from session directory
+        // Remove from session directory (handle both files and directories)
         let session_path = self.get_session_path(&full_path).await;
         if session_path.exists() {
-            tokio::fs::remove_file(&session_path)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            if session_path.is_dir() {
+                // Remove directory (may fail if not empty)
+                tokio::fs::remove_dir(&session_path)
+                    .await
+                    .map_err(|_| nfsstat3::NFS3ERR_NOTEMPTY)?;
+            } else {
+                tokio::fs::remove_file(&session_path)
+                    .await
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            }
         }
 
         Ok(())
@@ -637,20 +739,24 @@ impl NFSFileSystem for VibeNFS {
         };
 
         // Get source inode and metadata
-        let (inode, mut metadata) = self
+        let (inode, metadata) = self
             .get_metadata_by_path(&from_path)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?
             .ok_or(nfsstat3::NFS3ERR_NOENT)?;
 
-        // Update metadata with new path
-        metadata.path = to_path.to_string_lossy().to_string();
+        // Properly rename the inode (updates path mappings)
+        let old_path_str = from_path.to_string_lossy().to_string();
+        let new_path_str = to_path.to_string_lossy().to_string();
 
         let store = self.metadata.write().await;
         store
-            .put_inode(inode, &metadata)
+            .rename_inode(inode, &old_path_str, &new_path_str)
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         drop(store);
+
+        // Keep metadata reference for later checks
+        let _ = metadata;
 
         // Update directory cache
         self.remove_child_from_cache(from_dirid, inode).await;

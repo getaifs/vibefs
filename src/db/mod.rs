@@ -96,6 +96,33 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Rename an inode (update path mappings properly)
+    pub fn rename_inode(&self, inode_id: u64, old_path: &str, new_path: &str) -> Result<()> {
+        // Get current metadata
+        let mut metadata = self.get_inode(inode_id)?
+            .ok_or_else(|| anyhow::anyhow!("Inode {} not found", inode_id))?;
+
+        // Delete old path mapping
+        let old_path_key = format!("path:{}", old_path);
+        self.db.delete(old_path_key.as_bytes())?;
+
+        // Update metadata with new path
+        metadata.path = new_path.to_string();
+
+        // Store updated metadata (this also creates the new path mapping)
+        self.put_inode(inode_id, &metadata)?;
+
+        // If the file was dirty under the old path, update the dirty tracking
+        let old_dirty_key = format!("dirty:{}", old_path);
+        if self.db.get(old_dirty_key.as_bytes())?.is_some() {
+            self.db.delete(old_dirty_key.as_bytes())?;
+            let new_dirty_key = format!("dirty:{}", new_path);
+            self.db.put(new_dirty_key.as_bytes(), b"1")?;
+        }
+
+        Ok(())
+    }
+
     /// Get next available inode ID
     pub fn next_inode_id(&self) -> Result<u64> {
         let key = b"counter:inode";
