@@ -15,6 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.6.4] - 2026-01-14
+
+### Fixed
+- **NFS write corruption**: Replaced read-modify-write pattern with proper file seeking in write operations
+  - Prevents data corruption during concurrent writes
+  - Uses file handles with seek+write_all instead of read-modify-rewrite
+- **setattr truncation**: Implemented proper file truncation via setattr (set_size3)
+  - Previously setattr was a no-op, causing truncation operations to fail
+- **Session file reads**: Fixed reading files created in session but not marked dirty
+  - AppleDouble (`._`) files and other metadata files now read correctly
+  - Resolves ENOATTR errors during `fs::copy()` and `cp` operations
+- **Rename path mapping**: Added proper path mapping updates during rename operations
+  - Old path mapping is now deleted when renaming files
+  - Dirty flag is properly migrated to new path
+
+### Documentation
+- Updated FILE_STATE_MATRIX.md with NFS performance considerations
+  - Documented `CARGO_INCREMENTAL=0` workaround for Cargo builds
+  - Removed outdated "file corruption" and "rmdir" known issues
+
 ## [0.6.1] - 2026-01-14
 
 ### Changed

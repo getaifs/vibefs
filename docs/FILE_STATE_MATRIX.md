@@ -160,14 +160,20 @@ For each dirty file:
 
 ### Not Yet Implemented
 1. **File Deletion Tracking**: Deleting a file in session doesn't mark it as "should be removed in promotion"
-2. **rmdir Operation**: NFS rmdir not implemented, causing cargo build failures
-3. **File Corruption on Write**: Some large file writes via NFS may corrupt data
+2. **Hard Links**: NFSv3 LINK operation not implemented (nfsserve limitation)
 
 ### Edge Cases Needing Work
 1. **Hardlinks/Symlinks**: Partial support, may not work correctly
 2. **File Permissions**: Mode changes not tracked
 3. **Empty Directories**: Not persisted in Git (Git only tracks files)
 4. **Atomic Renames**: May not be atomic across session boundary
+
+### NFS Performance Considerations
+1. **File Locking**: NFS doesn't support the locking semantics that Rust's incremental compilation requires. For Cargo builds, set `CARGO_INCREMENTAL=0`:
+   ```bash
+   CARGO_INCREMENTAL=0 cargo build
+   ```
+2. **Build Artifacts**: Building large projects in NFS mounts is slower than local filesystems due to network overhead. Consider using `CARGO_TARGET_DIR` to place build artifacts on local storage.
 
 ---
 
