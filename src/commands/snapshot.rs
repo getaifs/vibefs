@@ -48,6 +48,89 @@ pub async fn snapshot<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()>
     Ok(())
 }
 
+/// Create a snapshot with a custom name
+pub async fn snapshot_with_name<P: AsRef<Path>>(repo_path: P, vibe_id: &str, name: &str) -> Result<()> {
+    // Validate that we're running from the correct directory
+    let _validated_root = cwd_validation::validate_cwd()
+        .context("Cannot create snapshot")?;
+
+    let repo_path = repo_path.as_ref();
+    let vibe_dir = repo_path.join(".vibe");
+    let session_dir = vibe_dir.join("sessions").join(vibe_id);
+
+    if !session_dir.exists() {
+        anyhow::bail!("Session '{}' does not exist", vibe_id);
+    }
+
+    // Create snapshot with custom name
+    let snapshot_name = format!("{}_snapshot_{}", vibe_id, name);
+    let snapshot_dir = vibe_dir.join("sessions").join(&snapshot_name);
+
+    if snapshot_dir.exists() {
+        anyhow::bail!("Snapshot '{}' already exists", name);
+    }
+
+    println!("Saving checkpoint: {}", name);
+
+    // Use platform-specific CoW copy
+    #[cfg(target_os = "macos")]
+    {
+        copy_with_clonefile(&session_dir, &snapshot_dir)?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        copy_with_reflink(&session_dir, &snapshot_dir)?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        copy_recursive(&session_dir, &snapshot_dir)?;
+    }
+
+    println!("✓ Checkpoint saved: {}", name);
+
+    Ok(())
+}
+
+/// List available snapshots for a session
+pub async fn list_snapshots<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
+    let repo_path = repo_path.as_ref();
+    let vibe_dir = repo_path.join(".vibe");
+    let sessions_dir = vibe_dir.join("sessions");
+
+    if !sessions_dir.exists() {
+        anyhow::bail!("No sessions directory found");
+    }
+
+    let prefix = format!("{}_snapshot_", vibe_id);
+    let mut snapshots: Vec<String> = Vec::new();
+
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) {
+            // Extract just the snapshot name part
+            let snapshot_name = name.strip_prefix(&prefix).unwrap_or(&name);
+            snapshots.push(snapshot_name.to_string());
+        }
+    }
+
+    if snapshots.is_empty() {
+        println!("No checkpoints found for session '{}'", vibe_id);
+        println!("\nCreate one with: vibe save <name>");
+    } else {
+        snapshots.sort();
+        println!("Available checkpoints for '{}':", vibe_id);
+        for name in &snapshots {
+            println!("  {}", name);
+        }
+        println!("\nRestore with: vibe undo <name>");
+    }
+
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn copy_with_clonefile(src: &Path, dst: &Path) -> Result<()> {
     use std::ffi::CString;

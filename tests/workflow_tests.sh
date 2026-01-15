@@ -134,7 +134,7 @@ test_workflow_init() {
 }
 
 # ============================================
-# WORKFLOW 2: Session Spawn (Local)
+# WORKFLOW 2: Session Creation
 # ============================================
 test_workflow_spawn_local() {
     local repo="$TEST_DIR/repo2"
@@ -143,8 +143,8 @@ test_workflow_spawn_local() {
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
 
-    # Test: spawn a session
-    $VIBE_BIN spawn test-session || { echo "vibe spawn failed"; return 1; }
+    # Test: create a session (using -c "true" to avoid interactive shell)
+    $VIBE_BIN new test-session -c "true" || { echo "vibe new failed"; return 1; }
 
     # Verify session directory created
     [ -d ".vibe/sessions/test-session" ] || { echo "session directory not created"; return 1; }
@@ -152,12 +152,12 @@ test_workflow_spawn_local() {
     # Verify session info file created
     [ -f ".vibe/sessions/test-session.json" ] || { echo "session info file not created"; return 1; }
 
-    echo "Spawn local workflow passed"
+    echo "Session creation workflow passed"
     return 0
 }
 
 # ============================================
-# WORKFLOW 3: Session Spawn with Auto-name
+# WORKFLOW 3: Session Create with Auto-name
 # ============================================
 test_workflow_spawn_autoname() {
     local repo="$TEST_DIR/repo3"
@@ -166,12 +166,12 @@ test_workflow_spawn_autoname() {
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
 
-    # Test: spawn without specifying name (should auto-generate)
-    output=$($VIBE_BIN spawn 2>&1)
+    # Test: new without specifying name (should auto-generate)
+    output=$($VIBE_BIN new -c "true" 2>&1)
 
     # Check if session was created (look for success message)
-    if ! echo "$output" | grep -q "spawned successfully\|Vibe workspace mounted\|Session directory"; then
-        echo "Spawn with auto-name did not indicate success"
+    if ! echo "$output" | grep -q "spawned successfully\|Vibe workspace mounted\|Session directory\|Spawning session"; then
+        echo "New with auto-name did not indicate success"
         echo "Output: $output"
         return 1
     fi
@@ -180,7 +180,7 @@ test_workflow_spawn_autoname() {
     session_count=$(ls -d .vibe/sessions/*/ 2>/dev/null | wc -l)
     [ "$session_count" -ge 1 ] || { echo "No session directory created"; return 1; }
 
-    echo "Spawn auto-name workflow passed"
+    echo "Create auto-name workflow passed"
     return 0
 }
 
@@ -193,7 +193,7 @@ test_workflow_file_editing() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn edit-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new edit-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/edit-test"
 
@@ -226,7 +226,7 @@ test_workflow_mark_dirty() {
     $VIBE_BIN daemon stop 2>/dev/null || true
     sleep 1
 
-    $VIBE_BIN spawn dirty-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new dirty-test -c "true" || { echo "vibe new failed"; return 1; }
 
     # Stop daemon again
     $VIBE_BIN daemon stop 2>/dev/null || true
@@ -255,7 +255,7 @@ test_workflow_status() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn status-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new status-test -c "true" || { echo "vibe new failed"; return 1; }
 
     # Test: vibe status should work
     output=$($VIBE_BIN status 2>&1) || { echo "vibe status failed"; return 1; }
@@ -280,7 +280,7 @@ test_workflow_status_json() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn json-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new json-test -c "true" || { echo "vibe new failed"; return 1; }
 
     # Test: vibe status --json
     output=$($VIBE_BIN status --json 2>&1) || { echo "vibe status --json failed"; return 1; }
@@ -297,7 +297,7 @@ test_workflow_status_json() {
 }
 
 # ============================================
-# WORKFLOW 8: Session Inspect
+# WORKFLOW 8: Session Status Verbose
 # ============================================
 test_workflow_inspect() {
     local repo="$TEST_DIR/repo8"
@@ -305,14 +305,14 @@ test_workflow_inspect() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn inspect-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new inspect-test -c "true" || { echo "vibe new failed"; return 1; }
 
     # Stop daemon to release RocksDB lock
     $VIBE_BIN daemon stop 2>/dev/null || true
     sleep 2
 
-    # Test: vibe inspect
-    output=$($VIBE_BIN inspect inspect-test 2>&1)
+    # Test: vibe status -v (replaces inspect)
+    output=$($VIBE_BIN status inspect-test -v 2>&1)
     exit_code=$?
 
     # Check for RocksDB lock error (known issue)
@@ -323,17 +323,17 @@ test_workflow_inspect() {
     fi
 
     if [ $exit_code -ne 0 ]; then
-        echo "vibe inspect failed with exit code $exit_code"
+        echo "vibe status -v failed with exit code $exit_code"
         echo "Output: $output"
         return 1
     fi
 
-    echo "Inspect workflow passed"
+    echo "Status verbose workflow passed"
     return 0
 }
 
 # ============================================
-# WORKFLOW 9: Session Inspect JSON
+# WORKFLOW 9: Session Status Verbose JSON
 # ============================================
 test_workflow_inspect_json() {
     local repo="$TEST_DIR/repo9"
@@ -341,13 +341,13 @@ test_workflow_inspect_json() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn inspect-json-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new inspect-json-test -c "true" || { echo "vibe new failed"; return 1; }
 
     $VIBE_BIN daemon stop 2>/dev/null || true
     sleep 2
 
-    # Test: vibe inspect --json
-    output=$($VIBE_BIN inspect inspect-json-test --json 2>&1)
+    # Test: vibe status -v --json (replaces inspect --json)
+    output=$($VIBE_BIN status inspect-json-test -v --json 2>&1)
 
     if echo "$output" | grep -q "Resource temporarily unavailable\|lock file"; then
         echo "RocksDB lock contention"
@@ -356,12 +356,12 @@ test_workflow_inspect_json() {
 
     # Should be valid JSON
     if ! echo "$output" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-        echo "Inspect JSON output is not valid JSON"
+        echo "Status verbose JSON output is not valid JSON"
         echo "Output: $output"
         return 1
     fi
 
-    echo "Inspect JSON workflow passed"
+    echo "Status verbose JSON workflow passed"
     return 0
 }
 
@@ -374,7 +374,7 @@ test_workflow_diff() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn diff-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new diff-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/diff-test"
 
@@ -412,7 +412,7 @@ test_workflow_diff_stat() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn diffstat-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new diffstat-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/diffstat-test"
     echo 'modified' > "$session_dir/README.md"
@@ -433,7 +433,7 @@ test_workflow_diff_stat() {
 }
 
 # ============================================
-# WORKFLOW 12: Snapshot Creation
+# WORKFLOW 12: Save/Checkpoint Creation
 # ============================================
 test_workflow_snapshot() {
     local repo="$TEST_DIR/repo12"
@@ -441,13 +441,13 @@ test_workflow_snapshot() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn snapshot-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new snapshot-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/snapshot-test"
     echo 'version 1' > "$session_dir/state.txt"
 
-    # Test: vibe snapshot
-    $VIBE_BIN snapshot snapshot-test || { echo "vibe snapshot failed"; return 1; }
+    # Test: vibe save (replaces snapshot)
+    $VIBE_BIN save -s snapshot-test || { echo "vibe save failed"; return 1; }
 
     # Verify snapshot was created
     snapshot_count=$(ls -d .vibe/sessions/snapshot-test_snapshot_* 2>/dev/null | wc -l)
@@ -457,12 +457,12 @@ test_workflow_snapshot() {
     snapshot_dir=$(ls -d .vibe/sessions/snapshot-test_snapshot_* 2>/dev/null | head -1)
     [ -f "$snapshot_dir/state.txt" ] || { echo "Snapshot doesn't contain state.txt"; return 1; }
 
-    echo "Snapshot workflow passed"
+    echo "Save workflow passed"
     return 0
 }
 
 # ============================================
-# WORKFLOW 13: Snapshot Preserves State
+# WORKFLOW 13: Save Preserves State
 # ============================================
 test_workflow_snapshot_preserves() {
     local repo="$TEST_DIR/repo13"
@@ -470,30 +470,30 @@ test_workflow_snapshot_preserves() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn preserve-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new preserve-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/preserve-test"
     echo 'version 1' > "$session_dir/file.txt"
 
-    $VIBE_BIN snapshot preserve-test || { echo "snapshot failed"; return 1; }
+    $VIBE_BIN save -s preserve-test || { echo "save failed"; return 1; }
 
-    # Modify after snapshot
+    # Modify after save
     echo 'version 2' > "$session_dir/file.txt"
 
-    # Verify snapshot has old version
+    # Verify save has old version
     snapshot_dir=$(ls -d .vibe/sessions/preserve-test_snapshot_* 2>/dev/null | head -1)
     snapshot_content=$(cat "$snapshot_dir/file.txt")
     session_content=$(cat "$session_dir/file.txt")
 
-    [ "$snapshot_content" = "version 1" ] || { echo "Snapshot doesn't have version 1"; return 1; }
+    [ "$snapshot_content" = "version 1" ] || { echo "Saved checkpoint doesn't have version 1"; return 1; }
     [ "$session_content" = "version 2" ] || { echo "Session doesn't have version 2"; return 1; }
 
-    echo "Snapshot preserves state workflow passed"
+    echo "Save preserves state workflow passed"
     return 0
 }
 
 # ============================================
-# WORKFLOW 14: Restore from Snapshot
+# WORKFLOW 14: Undo from Checkpoint
 # ============================================
 test_workflow_restore() {
     local repo="$TEST_DIR/repo14"
@@ -501,29 +501,27 @@ test_workflow_restore() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn restore-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new restore-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/restore-test"
     echo 'original' > "$session_dir/file.txt"
 
-    $VIBE_BIN snapshot restore-test || { echo "snapshot failed"; return 1; }
+    # Save with a named checkpoint
+    $VIBE_BIN save checkpoint1 -s restore-test || { echo "save failed"; return 1; }
 
-    # Modify after snapshot
+    # Modify after save
     echo 'modified' > "$session_dir/file.txt"
 
-    # Get snapshot name
-    snapshot_name=$(ls -1 .vibe/sessions/ | grep "restore-test_snapshot_" | head -1)
-
-    # Stop daemon before restore (restore requires write access to DB)
+    # Stop daemon before undo (restore requires write access to DB)
     $VIBE_BIN daemon stop 2>/dev/null || true
     sleep 1
 
-    # Test: vibe restore
-    output=$($VIBE_BIN restore restore-test --snapshot="$snapshot_name" 2>&1)
+    # Test: vibe undo (replaces restore)
+    output=$($VIBE_BIN undo checkpoint1 -s restore-test 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        echo "vibe restore failed"
+        echo "vibe undo failed"
         echo "Output: $output"
         return 1
     fi
@@ -535,7 +533,7 @@ test_workflow_restore() {
         return 1
     }
 
-    echo "Restore workflow passed"
+    echo "Undo workflow passed"
     return 0
 }
 
@@ -548,7 +546,7 @@ test_workflow_promote() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn promote-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new promote-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/promote-test"
     echo 'new feature' > "$session_dir/feature.rs"
@@ -601,7 +599,7 @@ test_workflow_promote_message() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn message-test || { echo "vibe spawn failed"; return 1; }
+    $VIBE_BIN new message-test -c "true" || { echo "vibe new failed"; return 1; }
 
     local session_dir=".vibe/sessions/message-test"
     echo 'feature' > "$session_dir/feature.rs"
@@ -634,8 +632,8 @@ test_workflow_promote_all() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn all-test-1 || { echo "spawn 1 failed"; return 1; }
-    $VIBE_BIN spawn all-test-2 || { echo "spawn 2 failed"; return 1; }
+    $VIBE_BIN new all-test-1 -c "true" || { echo "new 1 failed"; return 1; }
+    $VIBE_BIN new all-test-2 -c "true" || { echo "new 2 failed"; return 1; }
 
     echo 'f1' > ".vibe/sessions/all-test-1/f1.rs"
     echo 'f2' > ".vibe/sessions/all-test-2/f2.rs"
@@ -670,7 +668,7 @@ test_workflow_promote_only() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn only-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new only-test -c "true" || { echo "new failed"; return 1; }
 
     local session_dir=".vibe/sessions/only-test"
     mkdir -p "$session_dir/src"
@@ -700,7 +698,7 @@ test_workflow_close() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn close-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new close-test -c "true" || { echo "new failed"; return 1; }
 
     [ -d ".vibe/sessions/close-test" ] || { echo "session not created"; return 1; }
 
@@ -725,7 +723,7 @@ test_workflow_close() {
 }
 
 # ============================================
-# WORKFLOW 20: Close with Dirty Files Check
+# WORKFLOW 20: Check Dirty Files Before Close
 # ============================================
 test_workflow_close_dirty() {
     local repo="$TEST_DIR/repo20"
@@ -733,28 +731,28 @@ test_workflow_close_dirty() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn dirty-close || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new dirty-close -c "true" || { echo "new failed"; return 1; }
 
     # Create files in session
     echo 'content' > ".vibe/sessions/dirty-close/file.txt"
 
-    # Test: vibe close --dirty (should show dirty files without closing)
-    output=$($VIBE_BIN close dirty-close --dirty 2>&1)
+    # Test: vibe status shows dirty files (replaces close --dirty)
+    output=$($VIBE_BIN status dirty-close 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        echo "vibe close --dirty failed"
+        echo "vibe status failed"
         echo "Output: $output"
         return 1
     fi
 
     # Session should still exist
     if [ ! -d ".vibe/sessions/dirty-close" ]; then
-        echo "Session was closed when using --dirty flag"
+        echo "Session was closed unexpectedly"
         return 1
     fi
 
-    echo "Close dirty workflow passed"
+    echo "Check dirty workflow passed"
     return 0
 }
 
@@ -790,14 +788,14 @@ test_workflow_path() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn path-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new path-test -c "true" || { echo "new failed"; return 1; }
 
-    # Test: vibe path
-    output=$($VIBE_BIN path path-test 2>&1)
+    # Test: vibe status -p (replaces path)
+    output=$($VIBE_BIN status path-test -p 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        echo "vibe path failed"
+        echo "vibe status -p failed"
         echo "Output: $output"
         return 1
     fi
@@ -840,7 +838,7 @@ test_workflow_daemon_stop() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn daemon-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new daemon-test -c "true" || { echo "new failed"; return 1; }
 
     # Test: vibe daemon stop
     output=$($VIBE_BIN daemon stop 2>&1)
@@ -859,7 +857,7 @@ test_workflow_close_session_force() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn close-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new close-test -c "true" || { echo "new failed"; return 1; }
 
     [ -d ".vibe/sessions/close-test" ] || { echo "session not created"; return 1; }
 
@@ -884,7 +882,7 @@ test_workflow_close_session_force() {
 }
 
 # ============================================
-# WORKFLOW 26: Shell Command in Session
+# WORKFLOW 26: Command Execution in Session
 # ============================================
 test_workflow_sh_command() {
     local repo="$TEST_DIR/repo26"
@@ -892,19 +890,18 @@ test_workflow_sh_command() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn sh-test || { echo "vibe spawn failed"; return 1; }
 
-    # Test: vibe sh -c "command"
-    output=$($VIBE_BIN sh -s sh-test -c "pwd" 2>&1)
+    # Test: vibe new <session> -c "command" (replaces vibe sh)
+    output=$($VIBE_BIN new sh-test -c "pwd" 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
-        echo "vibe sh command failed"
+        echo "vibe new with command failed"
         echo "Output: $output"
         return 1
     fi
 
-    echo "Shell command workflow passed"
+    echo "Command execution workflow passed"
     return 0
 }
 
@@ -918,10 +915,10 @@ test_workflow_parallel_sessions() {
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
 
-    # Spawn multiple sessions
-    $VIBE_BIN spawn agent-1 || { echo "spawn agent-1 failed"; return 1; }
-    $VIBE_BIN spawn agent-2 || { echo "spawn agent-2 failed"; return 1; }
-    $VIBE_BIN spawn agent-3 || { echo "spawn agent-3 failed"; return 1; }
+    # Create multiple sessions
+    $VIBE_BIN new agent-1 -c "true" || { echo "new agent-1 failed"; return 1; }
+    $VIBE_BIN new agent-2 -c "true" || { echo "new agent-2 failed"; return 1; }
+    $VIBE_BIN new agent-3 -c "true" || { echo "new agent-3 failed"; return 1; }
 
     # Verify all exist
     [ -d ".vibe/sessions/agent-1" ] || { echo "agent-1 not created"; return 1; }
@@ -947,8 +944,8 @@ test_workflow_conflict_detection() {
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
 
-    $VIBE_BIN spawn conflict-1 || { echo "spawn 1 failed"; return 1; }
-    $VIBE_BIN spawn conflict-2 || { echo "spawn 2 failed"; return 1; }
+    $VIBE_BIN new conflict-1 -c "true" || { echo "new 1 failed"; return 1; }
+    $VIBE_BIN new conflict-2 -c "true" || { echo "new 2 failed"; return 1; }
 
     # Both modify same file
     echo 'version A' > ".vibe/sessions/conflict-1/README.md"
@@ -977,10 +974,10 @@ test_workflow_nfs_mount() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "vibe init failed"; return 1; }
-    $VIBE_BIN spawn nfs-test || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new nfs-test -c "true" || { echo "new failed"; return 1; }
 
     # Get the mount path
-    mount_path=$($VIBE_BIN path nfs-test 2>&1)
+    mount_path=$($VIBE_BIN status nfs-test -p 2>&1)
 
     # Check if mount exists and has files
     if [ -d "$mount_path" ]; then
@@ -1020,8 +1017,8 @@ test_workflow_e2e() {
     # 1. Init
     $VIBE_BIN init || { echo "init failed"; return 1; }
 
-    # 2. Spawn
-    $VIBE_BIN spawn e2e-test || { echo "spawn failed"; return 1; }
+    # 2. Create session
+    $VIBE_BIN new e2e-test -c "true" || { echo "new failed"; return 1; }
 
     # 3. Make changes
     local session_dir=".vibe/sessions/e2e-test"
@@ -1035,8 +1032,8 @@ test_workflow_e2e() {
         $MARK_DIRTY_BIN . e2e.rs || { echo "mark_dirty failed"; return 1; }
     fi
 
-    # 5. Create snapshot
-    $VIBE_BIN snapshot e2e-test || { echo "snapshot failed"; return 1; }
+    # 5. Create checkpoint (save)
+    $VIBE_BIN save -s e2e-test || { echo "save failed"; return 1; }
 
     # 6. Promote
     output=$($VIBE_BIN promote e2e-test -m "E2E test commit" 2>&1)
@@ -1075,28 +1072,34 @@ test_workflow_init_nongit() {
 }
 
 # ============================================
-# WORKFLOW 32: Spawn Without Init
+# WORKFLOW 32: New Session Auto-inits
 # ============================================
 test_workflow_spawn_noinit() {
     local repo="$TEST_DIR/repo32"
     setup_test_repo "$repo"
     cd "$repo"
 
-    # Don't run init, try to spawn directly
-    output=$($VIBE_BIN spawn no-init-test 2>&1)
+    # Don't run init, try to create session directly (should auto-init now)
+    output=$($VIBE_BIN new no-init-test -c "true" 2>&1)
     exit_code=$?
 
-    if [ $exit_code -eq 0 ]; then
-        echo "Spawn succeeded without init (should have failed)"
+    # With the new UX, vibe new should auto-init if needed
+    if [ $exit_code -ne 0 ]; then
+        echo "vibe new failed (should auto-init)"
+        echo "Output: $output"
         return 1
     fi
 
-    echo "Spawn without init workflow passed"
+    # Verify .vibe was created
+    [ -d ".vibe" ] || { echo ".vibe directory not created"; return 1; }
+    [ -d ".vibe/sessions/no-init-test" ] || { echo "session not created"; return 1; }
+
+    echo "Auto-init workflow passed"
     return 0
 }
 
 # ============================================
-# WORKFLOW 33: Double Spawn Same Session
+# WORKFLOW 33: Double Create Same Session
 # ============================================
 test_workflow_double_spawn() {
     local repo="$TEST_DIR/repo33"
@@ -1104,18 +1107,18 @@ test_workflow_double_spawn() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "init failed"; return 1; }
-    $VIBE_BIN spawn double-test || { echo "first spawn failed"; return 1; }
+    $VIBE_BIN new double-test -c "true" || { echo "first new failed"; return 1; }
 
-    # Try to spawn again with same name
-    output=$($VIBE_BIN spawn double-test 2>&1)
+    # Try to create again with same name
+    output=$($VIBE_BIN new double-test -c "true" 2>&1)
     exit_code=$?
 
     # Should either fail or handle gracefully
     if [ $exit_code -eq 0 ]; then
-        echo "Double spawn succeeded (may be OK if handled gracefully)"
+        echo "Double create succeeded (may be OK if handled gracefully)"
     fi
 
-    echo "Double spawn workflow passed"
+    echo "Double create workflow passed"
     return 0
 }
 
@@ -1128,7 +1131,7 @@ test_workflow_promote_empty() {
     cd "$repo"
 
     $VIBE_BIN init || { echo "init failed"; return 1; }
-    $VIBE_BIN spawn empty-promote || { echo "spawn failed"; return 1; }
+    $VIBE_BIN new empty-promote -c "true" || { echo "new failed"; return 1; }
 
     $VIBE_BIN daemon stop 2>/dev/null || true
     sleep 1
@@ -1153,7 +1156,7 @@ test_workflow_promote_empty() {
 }
 
 # ============================================
-# WORKFLOW 35: Launch with Nonexistent Agent
+# WORKFLOW 35: Unknown Command Error
 # ============================================
 test_workflow_launch_noagent() {
     local repo="$TEST_DIR/repo35"
@@ -1162,16 +1165,22 @@ test_workflow_launch_noagent() {
 
     $VIBE_BIN init || { echo "init failed"; return 1; }
 
-    # Try to launch nonexistent agent
-    output=$($VIBE_BIN launch nonexistent-agent-xyz 2>&1)
+    # Try to use unknown command (should fail with helpful message)
+    output=$($VIBE_BIN nonexistent-command-xyz 2>&1)
     exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
-        echo "Launch nonexistent agent should have failed"
+        echo "Unknown command should have failed"
         return 1
     fi
 
-    echo "Launch noagent workflow passed"
+    # Should mention it's an unknown command
+    if ! echo "$output" | grep -qi "unknown\|not found\|error"; then
+        echo "Error message not helpful"
+        echo "Output: $output"
+    fi
+
+    echo "Unknown command workflow passed"
     return 0
 }
 
@@ -1191,40 +1200,40 @@ main() {
 
     # Run all tests
     run_test "1. Basic Initialization" test_workflow_init
-    run_test "2. Session Spawn (Local)" test_workflow_spawn_local
-    run_test "3. Session Spawn Auto-name" test_workflow_spawn_autoname
+    run_test "2. Session Creation" test_workflow_spawn_local
+    run_test "3. Session Create Auto-name" test_workflow_spawn_autoname
     run_test "4. File Editing in Session" test_workflow_file_editing
     run_test "5. Mark Dirty Files" test_workflow_mark_dirty
     run_test "6. Session Status" test_workflow_status
     run_test "7. Session Status JSON" test_workflow_status_json
-    run_test "8. Session Inspect" test_workflow_inspect
-    run_test "9. Session Inspect JSON" test_workflow_inspect_json
+    run_test "8. Session Status Verbose" test_workflow_inspect
+    run_test "9. Session Status Verbose JSON" test_workflow_inspect_json
     run_test "10. Session Diff" test_workflow_diff
     run_test "11. Session Diff Stat" test_workflow_diff_stat
-    run_test "12. Snapshot Creation" test_workflow_snapshot
-    run_test "13. Snapshot Preserves State" test_workflow_snapshot_preserves
-    run_test "14. Restore from Snapshot" test_workflow_restore
+    run_test "12. Save Checkpoint" test_workflow_snapshot
+    run_test "13. Save Preserves State" test_workflow_snapshot_preserves
+    run_test "14. Undo from Checkpoint" test_workflow_restore
     run_test "15. Promote Session" test_workflow_promote
     run_test "16. Promote with Message" test_workflow_promote_message
     run_test "17. Promote All Sessions" test_workflow_promote_all
     run_test "18. Promote with --only" test_workflow_promote_only
     run_test "19. Close Session" test_workflow_close
-    run_test "20. Close with Dirty Check" test_workflow_close_dirty
+    run_test "20. Check Dirty Files" test_workflow_close_dirty
     run_test "21. Close Nonexistent Session" test_workflow_close_nonexistent
     run_test "22. Get Session Path" test_workflow_path
     run_test "23. Daemon Status" test_workflow_daemon_status
     run_test "24. Daemon Stop" test_workflow_daemon_stop
     run_test "25. Close Session with Force" test_workflow_close_session_force
-    run_test "26. Shell Command in Session" test_workflow_sh_command
+    run_test "26. Command Execution" test_workflow_sh_command
     run_test "27. Multiple Parallel Sessions" test_workflow_parallel_sessions
     run_test "28. Conflict Detection" test_workflow_conflict_detection
     run_test "29. NFS Mount Structure" test_workflow_nfs_mount
     run_test "30. Full E2E Workflow" test_workflow_e2e
     run_test "31. Init in Non-Git Dir" test_workflow_init_nongit
-    run_test "32. Spawn Without Init" test_workflow_spawn_noinit
-    run_test "33. Double Spawn Same Session" test_workflow_double_spawn
+    run_test "32. Auto-init on New" test_workflow_spawn_noinit
+    run_test "33. Double Create Session" test_workflow_double_spawn
     run_test "34. Promote Without Dirty Files" test_workflow_promote_empty
-    run_test "35. Launch Nonexistent Agent" test_workflow_launch_noagent
+    run_test "35. Unknown Command Error" test_workflow_launch_noagent
 
     # Final cleanup
     cleanup

@@ -70,15 +70,26 @@ impl Message {
     }
 }
 
+/// View mode for the dashboard
+#[derive(Debug, Clone, PartialEq)]
+enum ViewMode {
+    List,
+    FilePopup { show_excluded: bool },
+    DiffPreview,
+    ConfirmPromote,
+    ConfirmClose,
+}
+
 /// Dashboard application state
 struct DashboardApp {
     sessions: Vec<SessionInfo>,
     list_state: ListState,
     repo_name: String,
     repo_path: PathBuf,
-    show_dirty_popup: bool,
+    view_mode: ViewMode,
     popup_scroll: usize,
-    popup_show_excluded: bool,
+    diff_content: Vec<String>,
+    diff_scroll: usize,
     message: Option<Message>,
     last_refresh: Instant,
 }
@@ -92,9 +103,10 @@ impl DashboardApp {
             list_state,
             repo_name,
             repo_path,
-            show_dirty_popup: false,
+            view_mode: ViewMode::List,
             popup_scroll: 0,
-            popup_show_excluded: false,
+            diff_content: Vec::new(),
+            diff_scroll: 0,
             message: None,
             last_refresh: Instant::now(),
         }
@@ -150,16 +162,25 @@ impl DashboardApp {
         }
     }
 
-    fn popup_scroll_down(&mut self) {
-        if let Some(session) = self.selected_session() {
-            let max_scroll = if self.popup_show_excluded {
-                session.files.excluded.len().saturating_sub(1)
-            } else {
-                session.files.promotable.len().saturating_sub(1)
-            };
-            if self.popup_scroll < max_scroll {
-                self.popup_scroll += 1;
+    fn popup_scroll_down(&mut self, visible_height: usize) {
+        let max_items = match &self.view_mode {
+            ViewMode::FilePopup { show_excluded } => {
+                if let Some(session) = self.selected_session() {
+                    if *show_excluded {
+                        session.files.excluded.len()
+                    } else {
+                        session.files.promotable.len()
+                    }
+                } else {
+                    0
+                }
             }
+            ViewMode::DiffPreview => self.diff_content.len(),
+            _ => 0,
+        };
+        let max_scroll = max_items.saturating_sub(visible_height);
+        if self.popup_scroll < max_scroll {
+            self.popup_scroll += 1;
         }
     }
 
@@ -167,6 +188,13 @@ impl DashboardApp {
         if self.popup_scroll > 0 {
             self.popup_scroll -= 1;
         }
+    }
+
+    fn reset_popup(&mut self) {
+        self.view_mode = ViewMode::List;
+        self.popup_scroll = 0;
+        self.diff_content.clear();
+        self.diff_scroll = 0;
     }
 }
 
@@ -235,14 +263,19 @@ async fn run_dashboard_loop(
         // Draw the UI
         terminal.draw(|f| {
             let area = f.size();
+
+            // Calculate message bar height (1 if message, 0 otherwise)
+            let msg_height = if app.message.is_some() { 1 } else { 0 };
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(3),  // Title
-                    Constraint::Min(10),    // Session list
-                    Constraint::Length(10), // Details panel
-                    Constraint::Length(3),  // Help bar (always visible)
+                    Constraint::Length(3),           // Title
+                    Constraint::Min(10),             // Session list
+                    Constraint::Length(10),          // Details panel
+                    Constraint::Length(msg_height),  // Message bar (dynamic)
+                    Constraint::Length(3),           // Help bar (always visible)
                 ])
                 .split(area);
 
@@ -388,6 +421,21 @@ async fn run_dashboard_loop(
                 }
 
                 Paragraph::new(lines)
+            } else if app.sessions.is_empty() {
+                // Empty state with helpful hint
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("No sessions yet.", Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Press ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("n", Style::default().fg(Color::Yellow)),
+                        Span::styled(" to create one, or run ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("vibe new", Style::default().fg(Color::Cyan)),
+                    ]),
+                ])
             } else {
                 Paragraph::new("No session selected")
             };
@@ -399,94 +447,150 @@ async fn run_dashboard_loop(
             );
             f.render_widget(details_block, chunks[2]);
 
-            // Help bar - always visible with shortcuts, or message if present
-            let help_content = if let Some(ref msg) = app.message {
-                Line::from(vec![
-                    Span::styled(
-                        &msg.text,
-                        if msg.is_error {
-                            Style::default().fg(Color::Red)
-                        } else {
-                            Style::default().fg(Color::Green)
-                        },
-                    ),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled("q", Style::default().fg(Color::Yellow)),
-                    Span::raw(":quit "),
-                    Span::styled("j/k", Style::default().fg(Color::Yellow)),
-                    Span::raw(":nav "),
-                    Span::styled("d", Style::default().fg(Color::Yellow)),
-                    Span::raw(":files "),
-                    Span::styled("e", Style::default().fg(Color::Yellow)),
-                    Span::raw(":excluded "),
-                    Span::styled("c", Style::default().fg(Color::Yellow)),
-                    Span::raw(":close "),
-                    Span::styled("p", Style::default().fg(Color::Yellow)),
-                    Span::raw(":promote "),
-                    Span::styled("r", Style::default().fg(Color::Yellow)),
-                    Span::raw(":refresh"),
-                ])
-            };
+            // Message bar (separate from help, above it)
+            if let Some(ref msg) = app.message {
+                let msg_style = if msg.is_error {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::Green)
+                };
+                let msg_widget = Paragraph::new(Span::styled(&msg.text, msg_style))
+                    .style(Style::default().bg(Color::DarkGray));
+                f.render_widget(msg_widget, chunks[3]);
+            }
+
+            // Help bar - always visible with shortcuts
+            let help_content = Line::from(vec![
+                Span::styled("q", Style::default().fg(Color::Yellow)),
+                Span::raw(":quit "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(":nav "),
+                Span::styled("n", Style::default().fg(Color::Yellow)),
+                Span::raw(":new "),
+                Span::styled("d", Style::default().fg(Color::Yellow)),
+                Span::raw(":files "),
+                Span::styled("D", Style::default().fg(Color::Yellow)),
+                Span::raw(":diff "),
+                Span::styled("p", Style::default().fg(Color::Yellow)),
+                Span::raw(":promote "),
+                Span::styled("s", Style::default().fg(Color::Yellow)),
+                Span::raw(":save "),
+                Span::styled("c", Style::default().fg(Color::Yellow)),
+                Span::raw(":close "),
+                Span::styled("r", Style::default().fg(Color::Yellow)),
+                Span::raw(":refresh"),
+            ]);
 
             let help = Paragraph::new(help_content)
                 .block(Block::default().borders(Borders::ALL).title("Commands"));
-            f.render_widget(help, chunks[3]);
+            f.render_widget(help, chunks[4]);
 
-            // Dirty files popup (scrollable)
-            if app.show_dirty_popup {
-                if let Some(session) = app.selected_session() {
-                    let popup_area = centered_rect(70, 60, area);
+            // Popups based on view mode
+            match &app.view_mode {
+                ViewMode::FilePopup { show_excluded } => {
+                    if let Some(session) = app.selected_session() {
+                        let popup_area = centered_rect(70, 60, area);
+                        f.render_widget(Clear, popup_area);
+
+                        let files_to_show = if *show_excluded {
+                            &session.files.excluded
+                        } else {
+                            &session.files.promotable
+                        };
+
+                        let title = if *show_excluded {
+                            format!("Excluded Files - {} ({} files) [ESC:close e:promotable j/k:scroll]",
+                                session.vibe_id, files_to_show.len())
+                        } else {
+                            format!("Promotable Files - {} ({} files) [ESC:close e:excluded j/k:scroll]",
+                                session.vibe_id, files_to_show.len())
+                        };
+
+                        let visible_height = popup_area.height.saturating_sub(2) as usize;
+                        let max_scroll = files_to_show.len().saturating_sub(visible_height);
+                        let scroll = app.popup_scroll.min(max_scroll);
+
+                        let file_items: Vec<ListItem> = files_to_show
+                            .iter()
+                            .skip(scroll)
+                            .take(visible_height)
+                            .map(|file| {
+                                let style = if *show_excluded {
+                                    Style::default().fg(Color::DarkGray)
+                                } else {
+                                    Style::default().fg(Color::White)
+                                };
+                                ListItem::new(Line::from(Span::styled(file.as_str(), style)))
+                            })
+                            .collect();
+
+                        let file_list = List::new(file_items).block(
+                            Block::default()
+                                .title(title)
+                                .borders(Borders::ALL)
+                                .style(Style::default().bg(Color::Black)),
+                        );
+                        f.render_widget(file_list, popup_area);
+
+                        if files_to_show.len() > visible_height {
+                            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                                .begin_symbol(Some("↑"))
+                                .end_symbol(Some("↓"));
+                            let mut scrollbar_state = ScrollbarState::new(files_to_show.len())
+                                .position(scroll);
+                            f.render_stateful_widget(
+                                scrollbar,
+                                popup_area.inner(&ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+                                &mut scrollbar_state,
+                            );
+                        }
+                    }
+                }
+                ViewMode::DiffPreview => {
+                    let popup_area = centered_rect(85, 80, area);
                     f.render_widget(Clear, popup_area);
 
-                    let files_to_show = if app.popup_show_excluded {
-                        &session.files.excluded
-                    } else {
-                        &session.files.promotable
-                    };
-
-                    let title = if app.popup_show_excluded {
-                        format!("Excluded Files - {} ({} files) [ESC:close e:promotable j/k:scroll]",
-                            session.vibe_id, files_to_show.len())
-                    } else {
-                        format!("Promotable Files - {} ({} files) [ESC:close e:excluded j/k:scroll]",
-                            session.vibe_id, files_to_show.len())
-                    };
-
-                    // Calculate visible area (popup height minus borders)
                     let visible_height = popup_area.height.saturating_sub(2) as usize;
-                    let max_scroll = files_to_show.len().saturating_sub(visible_height);
-                    let scroll = app.popup_scroll.min(max_scroll);
+                    let scroll = app.popup_scroll;
 
-                    let file_items: Vec<ListItem> = files_to_show
+                    let diff_lines: Vec<Line> = app.diff_content
                         .iter()
                         .skip(scroll)
                         .take(visible_height)
-                        .map(|f| {
-                            let style = if app.popup_show_excluded {
-                                Style::default().fg(Color::DarkGray)
+                        .map(|line| {
+                            let style = if line.starts_with('+') && !line.starts_with("+++") {
+                                Style::default().fg(Color::Green)
+                            } else if line.starts_with('-') && !line.starts_with("---") {
+                                Style::default().fg(Color::Red)
+                            } else if line.starts_with("@@") {
+                                Style::default().fg(Color::Cyan)
+                            } else if line.starts_with("diff ") || line.starts_with("index ") {
+                                Style::default().fg(Color::Yellow)
                             } else {
                                 Style::default().fg(Color::White)
                             };
-                            ListItem::new(Line::from(Span::styled(f.as_str(), style)))
+                            Line::from(Span::styled(line.as_str(), style))
                         })
                         .collect();
 
-                    let file_list = List::new(file_items).block(
-                        Block::default()
+                    let session_name = app.selected_session()
+                        .map(|s| s.vibe_id.as_str())
+                        .unwrap_or("unknown");
+
+                    let title = format!("Diff Preview - {} [ESC:close j/k:scroll]", session_name);
+
+                    let diff_widget = Paragraph::new(diff_lines)
+                        .block(Block::default()
                             .title(title)
                             .borders(Borders::ALL)
-                            .style(Style::default().bg(Color::Black)),
-                    );
-                    f.render_widget(file_list, popup_area);
+                            .style(Style::default().bg(Color::Black)));
+                    f.render_widget(diff_widget, popup_area);
 
-                    // Scrollbar if needed
-                    if files_to_show.len() > visible_height {
+                    if app.diff_content.len() > visible_height {
                         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                             .begin_symbol(Some("↑"))
                             .end_symbol(Some("↓"));
-                        let mut scrollbar_state = ScrollbarState::new(files_to_show.len())
+                        let mut scrollbar_state = ScrollbarState::new(app.diff_content.len())
                             .position(scroll);
                         f.render_stateful_widget(
                             scrollbar,
@@ -495,33 +599,179 @@ async fn run_dashboard_loop(
                         );
                     }
                 }
+                ViewMode::ConfirmPromote => {
+                    if let Some(session) = app.selected_session() {
+                        let popup_area = centered_rect(50, 20, area);
+                        f.render_widget(Clear, popup_area);
+
+                        let content = vec![
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Promote "),
+                                Span::styled(&session.vibe_id, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                                Span::raw("?"),
+                            ]),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled(
+                                    format!("{} files will be committed", session.files.promotable.len()),
+                                    Style::default().fg(Color::Gray),
+                                ),
+                            ]),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled("y", Style::default().fg(Color::Green)),
+                                Span::raw(":confirm  "),
+                                Span::styled("n/ESC", Style::default().fg(Color::Red)),
+                                Span::raw(":cancel"),
+                            ]),
+                        ];
+
+                        let confirm = Paragraph::new(content)
+                            .alignment(ratatui::layout::Alignment::Center)
+                            .block(Block::default()
+                                .title("Confirm Promote")
+                                .borders(Borders::ALL)
+                                .style(Style::default().bg(Color::Black)));
+                        f.render_widget(confirm, popup_area);
+                    }
+                }
+                ViewMode::ConfirmClose => {
+                    if let Some(session) = app.selected_session() {
+                        let popup_area = centered_rect(50, 20, area);
+                        f.render_widget(Clear, popup_area);
+
+                        let warning = if !session.files.promotable.is_empty() {
+                            format!("Warning: {} uncommitted files will be lost!", session.files.promotable.len())
+                        } else {
+                            "Session is clean.".to_string()
+                        };
+
+                        let content = vec![
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::raw("Close session "),
+                                Span::styled(&session.vibe_id, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                                Span::raw("?"),
+                            ]),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled(
+                                    warning,
+                                    if session.files.promotable.is_empty() {
+                                        Style::default().fg(Color::Gray)
+                                    } else {
+                                        Style::default().fg(Color::Red)
+                                    },
+                                ),
+                            ]),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled("y", Style::default().fg(Color::Green)),
+                                Span::raw(":confirm  "),
+                                Span::styled("n/ESC", Style::default().fg(Color::Red)),
+                                Span::raw(":cancel"),
+                            ]),
+                        ];
+
+                        let confirm = Paragraph::new(content)
+                            .alignment(ratatui::layout::Alignment::Center)
+                            .block(Block::default()
+                                .title("Confirm Close")
+                                .borders(Borders::ALL)
+                                .style(Style::default().bg(Color::Black)));
+                        f.render_widget(confirm, popup_area);
+                    }
+                }
+                ViewMode::List => {}
             }
         })?;
 
         // Handle input with 200ms poll for responsive UI
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if app.show_dirty_popup {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('d') if !app.popup_show_excluded => {
-                            app.show_dirty_popup = false;
-                            app.popup_scroll = 0;
+                // Handle popup modes
+                match &app.view_mode {
+                    ViewMode::FilePopup { show_excluded } => {
+                        let show_excluded = *show_excluded;
+                        match key.code {
+                            KeyCode::Esc => app.reset_popup(),
+                            KeyCode::Char('d') if !show_excluded => app.reset_popup(),
+                            KeyCode::Char('e') => {
+                                app.view_mode = ViewMode::FilePopup { show_excluded: !show_excluded };
+                                app.popup_scroll = 0;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => app.popup_scroll_down(20),
+                            KeyCode::Char('k') | KeyCode::Up => app.popup_scroll_up(),
+                            _ => {}
                         }
-                        KeyCode::Esc => {
-                            app.show_dirty_popup = false;
-                            app.popup_scroll = 0;
-                        }
-                        KeyCode::Char('e') => {
-                            app.popup_show_excluded = !app.popup_show_excluded;
-                            app.popup_scroll = 0;
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => app.popup_scroll_down(),
-                        KeyCode::Char('k') | KeyCode::Up => app.popup_scroll_up(),
-                        _ => {}
+                        continue;
                     }
-                    continue;
+                    ViewMode::DiffPreview => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.reset_popup(),
+                            KeyCode::Char('j') | KeyCode::Down => app.popup_scroll_down(20),
+                            KeyCode::Char('k') | KeyCode::Up => app.popup_scroll_up(),
+                            KeyCode::Char('G') => {
+                                // Jump to end
+                                app.popup_scroll = app.diff_content.len().saturating_sub(20);
+                            }
+                            KeyCode::Char('g') => {
+                                // Jump to start
+                                app.popup_scroll = 0;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    ViewMode::ConfirmPromote => {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if let Some(session) = app.selected_session() {
+                                    let vibe_id = session.vibe_id.clone();
+                                    let repo_path = app.repo_path.clone();
+
+                                    app.set_message(format!("Promoting {}...", vibe_id), false);
+                                    app.reset_popup();
+
+                                    tokio::spawn(async move {
+                                        let _ = commands::promote::promote(&repo_path, &vibe_id, None, None).await;
+                                    });
+                                }
+                            }
+                            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                app.reset_popup();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    ViewMode::ConfirmClose => {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if let Some(session) = app.selected_session() {
+                                    let vibe_id = session.vibe_id.clone();
+                                    let repo_path = app.repo_path.clone();
+
+                                    app.set_message(format!("Closing {}...", vibe_id), false);
+                                    app.reset_popup();
+
+                                    tokio::spawn(async move {
+                                        let _ = commands::close::close(&repo_path, &vibe_id, true, false).await;
+                                    });
+                                }
+                            }
+                            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                app.reset_popup();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    ViewMode::List => {}
                 }
 
+                // Main list view key handling
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('r') => {
@@ -530,11 +780,21 @@ async fn run_dashboard_loop(
                     }
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Char('n') => {
+                        // Spawn new session
+                        app.set_message("Creating new session... Exit TUI to enter shell.".to_string(), false);
+                        let repo_path = app.repo_path.clone();
+                        let sessions_dir = repo_path.join(".vibe/sessions");
+                        let session_name = crate::names::generate_unique_name(&sessions_dir);
+
+                        tokio::spawn(async move {
+                            let _ = commands::spawn::spawn(&repo_path, &session_name).await;
+                        });
+                    }
                     KeyCode::Char('d') => {
                         if let Some(session) = app.selected_session() {
                             if !session.files.promotable.is_empty() {
-                                app.show_dirty_popup = true;
-                                app.popup_show_excluded = false;
+                                app.view_mode = ViewMode::FilePopup { show_excluded: false };
                                 app.popup_scroll = 0;
                             } else if !session.files.excluded.is_empty() {
                                 app.set_message("No promotable files. Press 'e' to view excluded.".to_string(), false);
@@ -544,41 +804,67 @@ async fn run_dashboard_loop(
                     KeyCode::Char('e') => {
                         if let Some(session) = app.selected_session() {
                             if !session.files.excluded.is_empty() {
-                                app.show_dirty_popup = true;
-                                app.popup_show_excluded = true;
+                                app.view_mode = ViewMode::FilePopup { show_excluded: true };
                                 app.popup_scroll = 0;
                             } else {
                                 app.set_message("No excluded files.".to_string(), false);
                             }
                         }
                     }
-                    KeyCode::Char('c') => {
-                        // Close session
+                    KeyCode::Char('D') => {
+                        // Show diff preview
                         if let Some(session) = app.selected_session() {
-                            let vibe_id = session.vibe_id.clone();
-                            let repo_path = app.repo_path.clone();
+                            if session.files.is_empty() {
+                                app.set_message("No changes to diff.".to_string(), false);
+                            } else {
+                                let vibe_id = session.vibe_id.clone();
+                                let repo_path = app.repo_path.clone();
 
-                            app.set_message(format!("Closing session {}...", vibe_id), false);
-
-                            // Spawn task to close session to avoid blocking TUI
-                            tokio::spawn(async move {
-                                let _ = commands::close::close(&repo_path, &vibe_id, true, false).await;
-                            });
+                                // Load diff content synchronously (it's fast for session files)
+                                match load_session_diff(&repo_path, &vibe_id) {
+                                    Ok(diff_lines) => {
+                                        if diff_lines.is_empty() {
+                                            app.set_message("No diff available.".to_string(), false);
+                                        } else {
+                                            app.diff_content = diff_lines;
+                                            app.popup_scroll = 0;
+                                            app.view_mode = ViewMode::DiffPreview;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.set_message(format!("Failed to load diff: {}", e), true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        // Show close confirmation
+                        if app.selected_session().is_some() {
+                            app.view_mode = ViewMode::ConfirmClose;
                         }
                     }
                     KeyCode::Char('p') => {
-                        // Show promote command hint
+                        // Show promote confirmation
                         if let Some(session) = app.selected_session() {
                             if session.files.promotable.is_empty() {
                                 app.set_message("No files to promote.".to_string(), false);
                             } else {
-                                app.set_message(
-                                    format!("Run: vibe promote {} ({} files)",
-                                        session.vibe_id,
-                                        session.files.promotable.len()),
-                                    false,
-                                );
+                                app.view_mode = ViewMode::ConfirmPromote;
                             }
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        // Save checkpoint
+                        if let Some(session) = app.selected_session() {
+                            let vibe_id = session.vibe_id.clone();
+                            let repo_path = app.repo_path.clone();
+
+                            app.set_message(format!("Saving checkpoint for {}...", vibe_id), false);
+
+                            tokio::spawn(async move {
+                                let _ = commands::snapshot::snapshot(&repo_path, &vibe_id).await;
+                            });
                         }
                     }
                     _ => {}
@@ -588,6 +874,61 @@ async fn run_dashboard_loop(
     }
 
     Ok(())
+}
+
+/// Load diff content for a session
+fn load_session_diff(repo_path: &Path, vibe_id: &str) -> Result<Vec<String>> {
+    use std::process::Command;
+
+    let session_dir = repo_path.join(".vibe/sessions").join(vibe_id);
+    if !session_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut diff_lines = Vec::new();
+
+    // Collect all files in session
+    let files = collect_dirty_files(&session_dir);
+
+    for file in files {
+        let session_file = session_dir.join(&file);
+        let repo_file = repo_path.join(&file);
+
+        // Check if file exists in repo
+        if repo_file.exists() {
+            // Modified file - show diff
+            let output = Command::new("diff")
+                .args(["-u", "--label", &format!("a/{}", file), "--label", &format!("b/{}", file)])
+                .arg(&repo_file)
+                .arg(&session_file)
+                .output()?;
+
+            let diff_output = String::from_utf8_lossy(&output.stdout);
+            if !diff_output.is_empty() {
+                for line in diff_output.lines() {
+                    diff_lines.push(line.to_string());
+                }
+                diff_lines.push(String::new());
+            }
+        } else {
+            // New file - show as all additions
+            diff_lines.push(format!("diff --git a/{} b/{}", file, file));
+            diff_lines.push("new file".to_string());
+            diff_lines.push(format!("--- /dev/null"));
+            diff_lines.push(format!("+++ b/{}", file));
+
+            if let Ok(content) = std::fs::read_to_string(&session_file) {
+                let lines: Vec<&str> = content.lines().collect();
+                diff_lines.push(format!("@@ -0,0 +1,{} @@", lines.len()));
+                for line in lines {
+                    diff_lines.push(format!("+{}", line));
+                }
+            }
+            diff_lines.push(String::new());
+        }
+    }
+
+    Ok(diff_lines)
 }
 
 fn collect_session_info(vibe_dir: &Path, repo_name: &str, repo_path: &Path) -> Result<Vec<SessionInfo>> {

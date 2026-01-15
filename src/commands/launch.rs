@@ -7,11 +7,16 @@ use std::path::Path;
 use crate::commands::spawn::{self, SpawnInfo};
 use crate::names;
 
-/// Known agent binaries for "did you mean" suggestions
-const KNOWN_AGENTS: &[&str] = &[
+/// Known agent binaries for shortcuts and "did you mean" suggestions
+pub const KNOWN_AGENTS: &[&str] = &[
     "claude", "cursor", "code", "codex", "amp", "aider",
     "nvim", "vim", "emacs", "zed", "hx",
 ];
+
+/// Check if a string is a known agent name
+pub fn is_known_agent(name: &str) -> bool {
+    KNOWN_AGENTS.contains(&name)
+}
 
 /// Launch an agent in a vibe session
 pub async fn launch<P: AsRef<Path>>(

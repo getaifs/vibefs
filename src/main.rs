@@ -29,7 +29,7 @@ struct Cli {
     repo: PathBuf,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -37,26 +37,38 @@ enum Commands {
     /// Initialize VibeFS for a Git repository
     Init,
 
-    /// Spawn a new vibe workspace
-    Spawn {
-        /// Session name for the new workspace (auto-generated if not provided)
+    /// Create a new session and enter shell
+    New {
+        /// Session name (auto-generated if not provided)
+        session: Option<String>,
+
+        /// Command to execute instead of interactive shell
+        #[arg(short, long)]
+        command: Option<String>,
+
+        /// Launch an agent (claude, cursor, aider, etc.) instead of shell
+        #[arg(long)]
+        agent: Option<String>,
+    },
+
+    /// Create a checkpoint of session state
+    Save {
+        /// Snapshot name (auto-generated timestamp if not provided)
+        name: Option<String>,
+
+        /// Session to snapshot (auto-detected if in mount or single session)
+        #[arg(short, long)]
         session: Option<String>,
     },
 
-    /// Create a zero-cost snapshot of a vibe session
-    Snapshot {
-        /// Session to snapshot
-        session: String,
-    },
+    /// Restore session from a checkpoint
+    Undo {
+        /// Snapshot name to restore (lists available if not provided)
+        name: Option<String>,
 
-    /// Restore session state from a snapshot
-    Restore {
-        /// Session ID to restore
-        session: String,
-
-        /// Snapshot name to restore from
-        #[arg(long)]
-        snapshot: String,
+        /// Session to restore (auto-detected if in mount or single session)
+        #[arg(short, long)]
+        session: Option<String>,
 
         /// Skip automatic backup of current state
         #[arg(long)]
@@ -65,8 +77,8 @@ enum Commands {
 
     /// Rebase session to current HEAD (update base commit)
     Rebase {
-        /// Session to rebase
-        session: String,
+        /// Session to rebase (auto-detected if in mount or single session)
+        session: Option<String>,
 
         /// Force rebase even if there are potential conflicts
         #[arg(short, long)]
@@ -75,11 +87,11 @@ enum Commands {
 
     /// Promote a vibe session into a Git commit
     Promote {
-        /// Session to promote (required unless --all is used)
+        /// Session to promote (auto-detected if in mount or single session)
         session: Option<String>,
 
         /// Promote all sessions with dirty files
-        #[arg(long)]
+        #[arg(short, long)]
         all: bool,
 
         /// Only promote files matching these glob patterns
@@ -93,52 +105,24 @@ enum Commands {
 
     /// Close a vibe session (unmount and clean up)
     Close {
-        /// Vibe ID to close
-        session: String,
+        /// Session to close (auto-detected if in mount or single session)
+        session: Option<String>,
 
         /// Force close without confirmation (even with dirty files)
         #[arg(short, long)]
         force: bool,
 
-        /// Only show dirty files, don't close the session
-        #[arg(long)]
-        dirty: bool,
-    },
+        /// Close all sessions
+        #[arg(short, long)]
+        all: bool,
 
-    /// Get the mount path for an existing vibe session
-    Path {
-        /// Vibe ID (must already exist)
-        session: String,
+        /// Also delete the .vibe directory entirely (use with --all)
+        #[arg(long)]
+        purge: bool,
     },
 
     /// Launch the TUI dashboard
     Dashboard,
-
-    /// Execute a command in a vibe workspace
-    #[command(name = "sh")]
-    Shell {
-        /// Session name for the workspace
-        #[arg(short, long, default_value = "default")]
-        session: String,
-
-        /// Command to execute
-        #[arg(short, long)]
-        command: Option<String>,
-
-        /// Create session if it doesn't exist (default: error if missing)
-        #[arg(long)]
-        create: bool,
-    },
-
-    /// Launch an agent in a new vibe session
-    Launch {
-        /// Agent binary name (claude, cursor, aider, code, etc.)
-        agent: String,
-
-        /// Use specific session name (default: auto-generated like "clever-claude")
-        #[arg(long)]
-        session: Option<String>,
-    },
 
     /// Daemon management commands
     Daemon {
@@ -146,20 +130,10 @@ enum Commands {
         action: DaemonAction,
     },
 
-    /// Inspect session metadata for debugging
-    Inspect {
-        /// Session ID to inspect
-        session: String,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
     /// Show unified diff of session changes
     Diff {
-        /// Session ID to show diff for
-        session: String,
+        /// Session ID to show diff for (auto-detected if in mount or single session)
+        session: Option<String>,
 
         /// Show diffstat summary only
         #[arg(long)]
@@ -176,24 +150,29 @@ enum Commands {
 
     /// Show daemon and session status
     Status {
-        /// Show details for a specific session
+        /// Show details for a specific session (auto-detected if in mount or single session)
         session: Option<String>,
 
         /// Show cross-session file conflicts
         #[arg(long)]
         conflicts: bool,
 
+        /// Show verbose debug information
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Print only the mount path (for scripting)
+        #[arg(short, long)]
+        path: bool,
+
         /// Output as JSON
-        #[arg(long)]
+        #[arg(short = 'J', long)]
         json: bool,
     },
 
-    /// Clean up VibeFS data (all sessions, or use `vibe close` for specific session)
-    Purge {
-        /// Force purge without confirmation
-        #[arg(short, long)]
-        force: bool,
-    },
+    /// Agent shortcut (e.g., 'vibe claude' -> 'vibe new --agent claude')
+    #[command(external_subcommand)]
+    Agent(Vec<String>),
 }
 
 #[derive(Subcommand)]
@@ -218,151 +197,138 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo_path = cli.repo.canonicalize().unwrap_or(cli.repo.clone());
 
-    match cli.command {
+    // Handle no subcommand: auto-init if needed, then launch dashboard
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            // Auto-init if .vibe/ doesn't exist
+            let vibe_dir = repo_path.join(".vibe");
+            if !vibe_dir.exists() {
+                commands::init::init(&repo_path).await?;
+            }
+            // Launch dashboard
+            tui::run_dashboard(&repo_path).await?;
+            return Ok(());
+        }
+    };
+
+    match command {
         Commands::Init => {
             commands::init::init(&repo_path).await?;
         }
-        Commands::Spawn { session } => {
+        Commands::New { session, command, agent } => {
+            // Auto-init if .vibe/ doesn't exist
+            let vibe_dir = repo_path.join(".vibe");
+            if !vibe_dir.exists() {
+                commands::init::init(&repo_path).await?;
+            }
+
+            // Generate session name if not provided
             let session = session.unwrap_or_else(|| {
                 let sessions_dir = repo_path.join(".vibe/sessions");
                 vibefs::names::generate_unique_name(&sessions_dir)
             });
-            commands::spawn::spawn(&repo_path, &session).await?;
+
+            // If agent is specified, delegate to launch
+            if let Some(agent_name) = agent {
+                commands::launch::launch(&repo_path, &agent_name, Some(&session)).await?;
+            } else {
+                // Spawn the session
+                commands::spawn::spawn(&repo_path, &session).await?;
+
+                // Connect to daemon and enter shell
+                let mut client = DaemonClient::connect(&repo_path).await?;
+                match client.export_session(&session).await? {
+                    DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
+                        // Ensure NFS is mounted
+                        if let Err(e) = commands::spawn::mount_nfs(&mount_point, nfs_port) {
+                            eprintln!("Warning: mount issue: {}", e);
+                        }
+
+                        if let Some(cmd) = command {
+                            // Execute command in mount point
+                            let status = std::process::Command::new("sh")
+                                .args(["-c", &cmd])
+                                .current_dir(&mount_point)
+                                .status()?;
+
+                            if !status.success() {
+                                std::process::exit(status.code().unwrap_or(1));
+                            }
+                        } else {
+                            // Interactive shell
+                            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                            let status = std::process::Command::new(&shell)
+                                .current_dir(&mount_point)
+                                .status()?;
+
+                            if !status.success() {
+                                std::process::exit(status.code().unwrap_or(1));
+                            }
+                        }
+                    }
+                    DaemonResponse::Error { message } => {
+                        anyhow::bail!("Daemon error: {}", message);
+                    }
+                    _ => {
+                        anyhow::bail!("Unexpected daemon response");
+                    }
+                }
+            }
         }
-        Commands::Snapshot { session } => {
-            commands::snapshot::snapshot(&repo_path, &session).await?;
+        Commands::Save { name, session } => {
+            let session = commands::require_session(&repo_path, session)?;
+            // Generate timestamp name if not provided
+            let snapshot_name = name.unwrap_or_else(|| {
+                chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
+            });
+            commands::snapshot::snapshot_with_name(&repo_path, &session, &snapshot_name).await?;
         }
-        Commands::Restore { session, snapshot, no_backup } => {
-            commands::restore::restore(&repo_path, &session, &snapshot, no_backup).await?;
+        Commands::Undo { name, session, no_backup } => {
+            let session = commands::require_session(&repo_path, session)?;
+            if let Some(snapshot_name) = name {
+                commands::restore::restore(&repo_path, &session, &snapshot_name, no_backup).await?;
+            } else {
+                // List available snapshots
+                commands::snapshot::list_snapshots(&repo_path, &session).await?;
+            }
         }
         Commands::Rebase { session, force } => {
+            let session = commands::require_session(&repo_path, session)?;
             commands::rebase::rebase(&repo_path, &session, force).await?;
         }
         Commands::Promote { session, all, only, message } => {
             if all {
                 commands::promote::promote_all(&repo_path, message.as_deref()).await?;
-            } else if let Some(id) = session {
-                commands::promote::promote(&repo_path, &id, only, message.as_deref()).await?;
             } else {
-                anyhow::bail!("Either provide a session name or use --all");
+                let id = commands::require_session(&repo_path, session)?;
+                commands::promote::promote(&repo_path, &id, only, message.as_deref()).await?;
             }
         }
-        Commands::Close { session, force, dirty } => {
-            commands::close::close(&repo_path, &session, force, dirty).await?;
-        }
-        Commands::Path { session } => {
-            // Check if session exists - do NOT auto-create
-            let vibe_dir = repo_path.join(".vibe");
-            let session_dir = vibe_dir.join("sessions").join(&session);
-
-            if !session_dir.exists() {
-                anyhow::bail!(
-                    "Session '{}' does not exist. Use 'vibe spawn {}' to create it.",
-                    session,
-                    session
-                );
-            }
-
-            // Check if daemon is running and session is mounted
-            if !DaemonClient::is_running(&repo_path).await {
-                anyhow::bail!(
-                    "Daemon not running. Session '{}' exists but is not mounted.\n\
-                     Use 'vibe spawn {}' to start the daemon and mount it.",
-                    session,
-                    session
-                );
-            }
-
-            let mut client = DaemonClient::connect(&repo_path).await?;
-
-            // List sessions to find this one
-            match client.list_sessions().await? {
-                DaemonResponse::Sessions { sessions } => {
-                    if let Some(sess) = sessions.iter().find(|s| s.vibe_id == session) {
-                        println!("{}", sess.mount_point);
-                    } else {
-                        anyhow::bail!(
-                            "Session '{}' exists but is not mounted.\n\
-                             Use 'vibe spawn {}' to mount it.",
-                            session,
-                            session
-                        );
+        Commands::Close { session, force, all, purge } => {
+            if all {
+                // Close all sessions
+                commands::purge::purge(&repo_path, force).await?;
+                if purge {
+                    // Also delete .vibe directory
+                    let vibe_dir = repo_path.join(".vibe");
+                    if vibe_dir.exists() {
+                        std::fs::remove_dir_all(&vibe_dir)?;
+                        println!("✓ Removed .vibe directory");
                     }
                 }
-                DaemonResponse::Error { message } => {
-                    anyhow::bail!("Daemon error: {}", message);
-                }
-                _ => {
-                    anyhow::bail!("Unexpected daemon response");
-                }
+            } else {
+                let session = commands::require_session(&repo_path, session)?;
+                commands::close::close(&repo_path, &session, force, false).await?;
             }
         }
-        Commands::Inspect { session, json } => {
-            commands::inspect::inspect(&repo_path, &session, json).await?;
-        }
         Commands::Diff { session, stat, color, no_pager } => {
+            let session = commands::require_session(&repo_path, session)?;
             let color_opt = color.parse().unwrap_or(commands::diff::ColorOption::Auto);
             commands::diff::diff(&repo_path, &session, stat, color_opt, no_pager).await?;
         }
         Commands::Dashboard => {
             tui::run_dashboard(&repo_path).await?;
-        }
-        Commands::Shell { session, command, create } => {
-            // Check if session exists (unless --create is passed)
-            let session_dir = repo_path.join(".vibe/sessions").join(&session);
-            if !create && !session_dir.exists() {
-                anyhow::bail!(
-                    "Session '{}' does not exist.\n\
-                     Use 'vibe spawn {}' to create it, or use 'vibe sh --create -s {}'",
-                    session, session, session
-                );
-            }
-
-            // Ensure daemon is running
-            daemon_client::ensure_daemon_running(&repo_path).await?;
-
-            let mut client = DaemonClient::connect(&repo_path).await?;
-
-            // Export session (creates if --create was passed)
-            match client.export_session(&session).await? {
-                DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
-                    // Ensure NFS is mounted (handles stale mounts from daemon restart)
-                    if let Err(e) = commands::spawn::mount_nfs(&mount_point, nfs_port) {
-                        eprintln!("Warning: mount issue: {}", e);
-                    }
-
-                    if let Some(cmd) = command {
-                        // Execute command in mount point
-                        let status = std::process::Command::new("sh")
-                            .args(["-c", &cmd])
-                            .current_dir(&mount_point)
-                            .status()?;
-
-                        if !status.success() {
-                            std::process::exit(status.code().unwrap_or(1));
-                        }
-                    } else {
-                        // Interactive shell
-                        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                        let status = std::process::Command::new(&shell)
-                            .current_dir(&mount_point)
-                            .status()?;
-
-                        if !status.success() {
-                            std::process::exit(status.code().unwrap_or(1));
-                        }
-                    }
-                }
-                DaemonResponse::Error { message } => {
-                    anyhow::bail!("Daemon error: {}", message);
-                }
-                _ => {
-                    anyhow::bail!("Unexpected daemon response");
-                }
-            }
-        }
-        Commands::Launch { agent, session } => {
-            commands::launch::launch(&repo_path, &agent, session.as_deref()).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {
@@ -407,11 +373,45 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Status { session, conflicts, json } => {
-            commands::status::status(&repo_path, session.as_deref(), conflicts, json).await?;
+        Commands::Status { session, conflicts, verbose, path, json } => {
+            if path {
+                // Path-only mode: print mount path for scripting
+                let session = commands::require_session(&repo_path, session)?;
+                let spawn_info = commands::spawn::SpawnInfo::load(&repo_path, &session)?;
+                println!("{}", spawn_info.mount_point.display());
+            } else if verbose {
+                // Verbose mode: use inspect logic for detailed debug info
+                let session = commands::require_session(&repo_path, session)?;
+                commands::inspect::inspect(&repo_path, &session, json).await?;
+            } else {
+                commands::status::status(&repo_path, session.as_deref(), conflicts, json).await?;
+            }
         }
-        Commands::Purge { force } => {
-            commands::purge::purge(&repo_path, force).await?;
+        Commands::Agent(args) => {
+            // Check if first arg is a known agent
+            if let Some(agent) = args.first() {
+                if commands::launch::is_known_agent(agent) {
+                    // Auto-init if .vibe/ doesn't exist
+                    let vibe_dir = repo_path.join(".vibe");
+                    if !vibe_dir.exists() {
+                        commands::init::init(&repo_path).await?;
+                    }
+                    // Treat as: vibe new --agent <agent>
+                    commands::launch::launch(&repo_path, agent, None).await?;
+                } else {
+                    // Unknown command - show helpful error
+                    let known = commands::launch::KNOWN_AGENTS.join(", ");
+                    anyhow::bail!(
+                        "Unknown command '{}'\n\n\
+                         Known agent shortcuts: {}\n\n\
+                         Run 'vibe --help' to see available commands.",
+                        agent,
+                        known
+                    );
+                }
+            } else {
+                anyhow::bail!("No command provided. Run 'vibe --help' for usage.");
+            }
         }
     }
 
