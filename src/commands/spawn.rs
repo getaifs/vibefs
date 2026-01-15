@@ -86,6 +86,12 @@ pub async fn spawn<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()> {
             match platform::mount_nfs(&mount_point, nfs_port) {
                 Ok(_) => {
                     println!("  ✓ NFS mounted at: {}", mount_point);
+
+                    // Create .vibe-origin file so commands work from inside the mount
+                    let origin_file = PathBuf::from(&mount_point).join(".vibe-origin");
+                    if let Err(e) = std::fs::write(&origin_file, repo_path.display().to_string()) {
+                        eprintln!("  Warning: Failed to create origin file: {}", e);
+                    }
                 }
                 Err(e) => {
                     // NFS mounting failed - provide instructions but don't fail

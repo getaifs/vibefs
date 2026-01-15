@@ -11,6 +11,7 @@ use crate::names;
 pub const KNOWN_AGENTS: &[&str] = &[
     "claude", "cursor", "code", "codex", "amp", "aider",
     "nvim", "vim", "emacs", "zed", "hx",
+    "mock-agent",  // For testing
 ];
 
 /// Check if a string is a known agent name
@@ -23,6 +24,7 @@ pub async fn launch<P: AsRef<Path>>(
     repo_path: P,
     agent: &str,
     session_name: Option<&str>,
+    agent_args: &[String],
 ) -> Result<()> {
     let repo_path = repo_path.as_ref();
     let vibe_dir = repo_path.join(".vibe");
@@ -48,10 +50,15 @@ pub async fn launch<P: AsRef<Path>>(
 
     let mount_point = spawn_info.mount_point;
 
-    println!("Executing {} in {}", agent, mount_point.display());
+    if agent_args.is_empty() {
+        println!("Executing {} in {}", agent, mount_point.display());
+    } else {
+        println!("Executing {} {} in {}", agent, agent_args.join(" "), mount_point.display());
+    }
 
     // exec the agent - this replaces the current process
     let err = std::process::Command::new(&agent_path)
+        .args(agent_args)
         .current_dir(&mount_point)
         .exec();
 

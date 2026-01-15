@@ -2,7 +2,7 @@
 //! Handles differences between macOS and Linux for mount points, NFS, and reflinks.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Get the mount point directory for VibeFS based on the platform
@@ -145,4 +145,58 @@ pub fn unmount_nfs_sync(mount_point: &str) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     Ok(())
+}
+
+/// Detect if the current or given path is inside a vibe mount
+/// Returns the original repo path if found
+pub fn detect_vibe_mount_origin(start_path: &Path) -> Option<PathBuf> {
+    let mounts_dir = get_vibe_mounts_dir();
+
+    // Check if we're inside the mounts directory
+    if !start_path.starts_with(&mounts_dir) {
+        return None;
+    }
+
+    // Walk up from start_path looking for .vibe-origin file
+    let mut current = start_path.to_path_buf();
+    loop {
+        let origin_file = current.join(".vibe-origin");
+        if origin_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&origin_file) {
+                let repo_path = PathBuf::from(content.trim());
+                if repo_path.exists() {
+                    return Some(repo_path);
+                }
+            }
+        }
+
+        // Stop if we've reached the mounts directory or can't go up further
+        if current == mounts_dir || !current.pop() {
+            break;
+        }
+    }
+
+    None
+}
+
+/// Get the effective repo path, detecting if we're in a vibe mount
+pub fn get_effective_repo_path(specified_path: &Path) -> PathBuf {
+    // First, try to canonicalize the specified path
+    let canonical = specified_path.canonicalize().unwrap_or_else(|_| specified_path.to_path_buf());
+
+    // Check if we're in a vibe mount
+    if let Some(origin) = detect_vibe_mount_origin(&canonical) {
+        return origin;
+    }
+
+    // Also check current directory if it's different
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd != canonical {
+            if let Some(origin) = detect_vibe_mount_origin(&cwd) {
+                return origin;
+            }
+        }
+    }
+
+    canonical
 }

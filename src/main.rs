@@ -49,6 +49,10 @@ enum Commands {
         /// Launch an agent (claude, cursor, aider, etc.) instead of shell
         #[arg(long)]
         agent: Option<String>,
+
+        /// Additional arguments to pass to the agent (use after --)
+        #[arg(last = true)]
+        agent_args: Vec<String>,
     },
 
     /// Create a checkpoint of session state
@@ -195,7 +199,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let repo_path = cli.repo.canonicalize().unwrap_or(cli.repo.clone());
+    let repo_path = vibefs::platform::get_effective_repo_path(&cli.repo);
 
     // Handle no subcommand: auto-init if needed, then launch dashboard
     let command = match cli.command {
@@ -216,7 +220,7 @@ async fn main() -> Result<()> {
         Commands::Init => {
             commands::init::init(&repo_path).await?;
         }
-        Commands::New { session, command, agent } => {
+        Commands::New { session, command, agent, agent_args } => {
             // Auto-init if .vibe/ doesn't exist
             let vibe_dir = repo_path.join(".vibe");
             if !vibe_dir.exists() {
@@ -231,7 +235,7 @@ async fn main() -> Result<()> {
 
             // If agent is specified, delegate to launch
             if let Some(agent_name) = agent {
-                commands::launch::launch(&repo_path, &agent_name, Some(&session)).await?;
+                commands::launch::launch(&repo_path, &agent_name, Some(&session), &agent_args).await?;
             } else {
                 // Spawn the session
                 commands::spawn::spawn(&repo_path, &session).await?;
@@ -396,8 +400,9 @@ async fn main() -> Result<()> {
                     if !vibe_dir.exists() {
                         commands::init::init(&repo_path).await?;
                     }
-                    // Treat as: vibe new --agent <agent>
-                    commands::launch::launch(&repo_path, agent, None).await?;
+                    // Pass remaining args to the agent
+                    let agent_args: Vec<String> = args.iter().skip(1).cloned().collect();
+                    commands::launch::launch(&repo_path, agent, None, &agent_args).await?;
                 } else {
                     // Unknown command - show helpful error
                     let known = commands::launch::KNOWN_AGENTS.join(", ");
