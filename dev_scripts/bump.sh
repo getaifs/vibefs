@@ -86,11 +86,6 @@ sed -i.bak "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo
 rm Cargo.toml.bak
 echo -e "${GREEN}✓${NC} Updated Cargo.toml"
 
-# Update Cargo.lock
-echo -e "${BLUE}Updating Cargo.lock...${NC}"
-cargo check --quiet 2>/dev/null || true
-echo -e "${GREEN}✓${NC} Updated Cargo.lock"
-
 # Run tests
 echo -e "${BLUE}Running tests...${NC}"
 if cargo test --quiet; then
@@ -108,7 +103,7 @@ echo -e "${GREEN}✓${NC} Build successful"
 
 # Git operations
 echo -e "${BLUE}Creating commit...${NC}"
-git add Cargo.toml Cargo.lock
+git add Cargo.toml
 git commit -m "chore: bump version to $NEW_VERSION"
 echo -e "${GREEN}✓${NC} Committed"
 
