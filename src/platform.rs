@@ -147,6 +147,65 @@ pub fn unmount_nfs_sync(mount_point: &str) -> Result<()> {
     Ok(())
 }
 
+/// Get the path to the mount registry file
+fn get_mount_registry_path() -> PathBuf {
+    get_vibe_mounts_dir().parent().unwrap().join("mount-registry.json")
+}
+
+/// Registry entry for a mount
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct MountRegistry {
+    /// Maps mount_point -> repo_path
+    mounts: std::collections::HashMap<String, String>,
+}
+
+/// Register a mount point with its original repo path
+pub fn register_mount(mount_point: &str, repo_path: &Path) -> Result<()> {
+    let registry_path = get_mount_registry_path();
+
+    // Load existing registry or create new
+    let mut registry: MountRegistry = if registry_path.exists() {
+        let content = std::fs::read_to_string(&registry_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        MountRegistry::default()
+    };
+
+    // Add/update entry
+    registry.mounts.insert(
+        mount_point.to_string(),
+        repo_path.to_string_lossy().to_string(),
+    );
+
+    // Save
+    if let Some(parent) = registry_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(&registry)?;
+    std::fs::write(&registry_path, content)?;
+
+    Ok(())
+}
+
+/// Unregister a mount point
+pub fn unregister_mount(mount_point: &str) -> Result<()> {
+    let registry_path = get_mount_registry_path();
+
+    if !registry_path.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&registry_path)?;
+    let mut registry: MountRegistry = serde_json::from_str(&content).unwrap_or_default();
+
+    registry.mounts.remove(mount_point);
+
+    let content = serde_json::to_string_pretty(&registry)?;
+    std::fs::write(&registry_path, content)?;
+
+    Ok(())
+}
+
 /// Detect if the current or given path is inside a vibe mount
 /// Returns the original repo path if found
 pub fn detect_vibe_mount_origin(start_path: &Path) -> Option<PathBuf> {
@@ -157,16 +216,23 @@ pub fn detect_vibe_mount_origin(start_path: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    // Walk up from start_path looking for .vibe-origin file
+    // Load registry
+    let registry_path = get_mount_registry_path();
+    if !registry_path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&registry_path).ok()?;
+    let registry: MountRegistry = serde_json::from_str(&content).ok()?;
+
+    // Walk up from start_path looking for a registered mount point
     let mut current = start_path.to_path_buf();
     loop {
-        let origin_file = current.join(".vibe-origin");
-        if origin_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&origin_file) {
-                let repo_path = PathBuf::from(content.trim());
-                if repo_path.exists() {
-                    return Some(repo_path);
-                }
+        let current_str = current.to_string_lossy();
+        if let Some(repo_path) = registry.mounts.get(current_str.as_ref()) {
+            let repo = PathBuf::from(repo_path);
+            if repo.exists() {
+                return Some(repo);
             }
         }
 

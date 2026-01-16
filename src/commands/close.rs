@@ -128,6 +128,11 @@ pub async fn close<P: AsRef<Path>>(
                 .await;
             }
 
+            // Unregister mount from central registry
+            if let Err(e) = platform::unregister_mount(&mount_point.to_string_lossy()) {
+                eprintln!("Warning: Failed to unregister mount: {}", e);
+            }
+
             // Remove mount point directory
             if let Err(e) = std::fs::remove_dir(&mount_point) {
                 eprintln!("Warning: Failed to remove mount point: {}", e);
