@@ -374,8 +374,11 @@ async fn setup_artifact_symlinks(
         std::os::unix::fs::symlink(&local_path, &symlink_path)
             .with_context(|| format!("Failed to create symlink: {} -> {}", symlink_path.display(), local_path.display()))?;
 
-        // Register symlink in metadata so NFS exposes it
+        // Register symlink in metadata so NFS exposes it (skip if already registered)
         let store = metadata.write().await;
+        if store.get_inode_by_path(dir_name)?.is_some() {
+            continue;
+        }
         let inode_id = store.next_inode_id()?;
         let target_str = local_path.to_string_lossy().to_string();
         let meta = InodeMetadata {

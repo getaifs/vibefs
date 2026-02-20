@@ -71,8 +71,22 @@ impl VibeNFS {
         // Get all inodes and build parent-child relationships
         let all_entries = store.get_all_inodes()?;
 
-        // Build directory tree
+        // Deduplicate: only keep the canonical inode for each path
+        // (the one that the path reverse-mapping points to).
+        // Old artifact symlink entries can leave orphan forward-mappings.
+        let mut canonical_inodes = std::collections::HashSet::new();
+        for (_inode, meta) in &all_entries {
+            if let Ok(Some(canonical_id)) = store.get_inode_by_path(&meta.path) {
+                canonical_inodes.insert(canonical_id);
+            }
+        }
+
+        // Build directory tree using only canonical inodes
         for (inode, meta) in &all_entries {
+            if !canonical_inodes.contains(inode) {
+                continue; // Skip orphan/duplicate inode
+            }
+
             let path = Path::new(&meta.path);
 
             // Determine parent inode
