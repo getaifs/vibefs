@@ -7,6 +7,12 @@ use std::process::Command;
 
 /// Get the mount point directory for VibeFS based on the platform
 pub fn get_vibe_mounts_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("VIBE_MOUNTS_DIR") {
+        if !override_dir.trim().is_empty() {
+            return PathBuf::from(override_dir);
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         PathBuf::from(format!(

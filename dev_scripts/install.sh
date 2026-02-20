@@ -42,8 +42,6 @@ echo "Repo root: $REPO_ROOT"
 # Check for built binaries
 VIBE_BIN="$REPO_ROOT/target/release/vibe"
 VIBED_BIN="$REPO_ROOT/target/release/vibed"
-MARK_DIRTY_BIN="$REPO_ROOT/target/release/mark_dirty"
-
 if [ ! -f "$VIBE_BIN" ]; then
     echo -e "${RED}Error: vibe binary not found at $VIBE_BIN${NC}"
     echo "Please build first: cargo build --release"
@@ -67,36 +65,30 @@ if $IN_CONTAINER && command -v distrobox-host-exec &> /dev/null; then
     # Copy binaries to host
     cp "$VIBE_BIN" "/tmp/vibe.tmp"
     cp "$VIBED_BIN" "/tmp/vibed.tmp"
-    cp "$MARK_DIRTY_BIN" "/tmp/mark_dirty.tmp"
 
     distrobox-host-exec cp /tmp/vibe.tmp "$INSTALL_DIR/vibe"
     distrobox-host-exec cp /tmp/vibed.tmp "$INSTALL_DIR/vibed"
-    distrobox-host-exec cp /tmp/mark_dirty.tmp "$INSTALL_DIR/mark_dirty"
-    distrobox-host-exec chmod +x "$INSTALL_DIR/vibe" "$INSTALL_DIR/vibed" "$INSTALL_DIR/mark_dirty"
+    distrobox-host-exec chmod +x "$INSTALL_DIR/vibe" "$INSTALL_DIR/vibed"
 
-    rm /tmp/vibe.tmp /tmp/vibed.tmp /tmp/mark_dirty.tmp
+    rm /tmp/vibe.tmp /tmp/vibed.tmp
 
     echo -e "${GREEN}✓${NC} Installed to host: $INSTALL_DIR/vibe"
     echo -e "${GREEN}✓${NC} Installed to host: $INSTALL_DIR/vibed"
-    echo -e "${GREEN}✓${NC} Installed to host: $INSTALL_DIR/mark_dirty"
 else
     # Regular install
     cp "$VIBE_BIN" "$INSTALL_DIR/vibe"
     cp "$VIBED_BIN" "$INSTALL_DIR/vibed"
-    cp "$MARK_DIRTY_BIN" "$INSTALL_DIR/mark_dirty"
-    chmod +x "$INSTALL_DIR/vibe" "$INSTALL_DIR/vibed" "$INSTALL_DIR/mark_dirty"
+    chmod +x "$INSTALL_DIR/vibe" "$INSTALL_DIR/vibed"
 
     # Re-sign binaries on macOS (required after copy, prevents SIGKILL)
     if [ "$PLATFORM" = "macos" ]; then
         echo "Re-signing binaries for macOS..."
         codesign -s - --force "$INSTALL_DIR/vibe"
         codesign -s - --force "$INSTALL_DIR/vibed"
-        codesign -s - --force "$INSTALL_DIR/mark_dirty"
     fi
 
     echo -e "${GREEN}✓${NC} Installed: $INSTALL_DIR/vibe"
     echo -e "${GREEN}✓${NC} Installed: $INSTALL_DIR/vibed"
-    echo -e "${GREEN}✓${NC} Installed: $INSTALL_DIR/mark_dirty"
 fi
 
 # Check if install directory is in PATH

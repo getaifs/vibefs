@@ -14,14 +14,30 @@ pub mod rebase;
 use anyhow::{Context, Result};
 use std::path::Path;
 
+/// Detection source for session auto-detection
+#[derive(Debug, Clone, PartialEq)]
+pub enum DetectionSource {
+    /// Session detected from mount path
+    Mount,
+    /// Session detected as the only active session
+    OnlySession,
+}
+
+/// Result of session detection
+#[derive(Debug, Clone)]
+pub struct DetectedSession {
+    pub session_id: String,
+    pub source: DetectionSource,
+}
+
 /// Detect the current session from the working directory.
 ///
-/// Returns `Some(session_id)` if:
+/// Returns `Some(DetectedSession)` if:
 /// - cwd is inside a vibe mount point, OR
 /// - there's exactly one active session
 ///
 /// Returns `None` if detection fails (multiple sessions, not in mount, etc.)
-pub fn detect_current_session(repo_path: &Path) -> Result<Option<String>> {
+pub fn detect_current_session(repo_path: &Path) -> Result<Option<DetectedSession>> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
     // Get the vibe mounts directory
@@ -43,7 +59,10 @@ pub fn detect_current_session(repo_path: &Path) -> Result<Option<String>> {
                         if entry.file_type()?.is_dir() {
                             let session_id = entry.file_name().to_string_lossy().to_string();
                             if mount_name.ends_with(&format!("-{}", session_id)) {
-                                return Ok(Some(session_id));
+                                return Ok(Some(DetectedSession {
+                                    session_id,
+                                    source: DetectionSource::Mount,
+                                }));
                             }
                         }
                     }
@@ -68,14 +87,18 @@ pub fn detect_current_session(repo_path: &Path) -> Result<Option<String>> {
         }
 
         if session_dirs.len() == 1 {
-            return Ok(Some(session_dirs.remove(0)));
+            return Ok(Some(DetectedSession {
+                session_id: session_dirs.remove(0),
+                source: DetectionSource::OnlySession,
+            }));
         }
     }
 
     Ok(None)
 }
 
-/// Get session or return error with helpful message listing available sessions
+/// Get session or return error with helpful message listing available sessions.
+/// Prints info message when session is auto-detected.
 pub fn require_session(repo_path: &Path, session: Option<String>) -> Result<String> {
     if let Some(s) = session {
         return Ok(s);
@@ -83,7 +106,15 @@ pub fn require_session(repo_path: &Path, session: Option<String>) -> Result<Stri
 
     // Try auto-detection
     if let Some(detected) = detect_current_session(repo_path)? {
-        return Ok(detected);
+        match detected.source {
+            DetectionSource::Mount => {
+                eprintln!("Using session '{}' (detected from mount)", detected.session_id);
+            }
+            DetectionSource::OnlySession => {
+                eprintln!("Using session '{}' (only active session)", detected.session_id);
+            }
+        }
+        return Ok(detected.session_id);
     }
 
     // Build error message with available sessions

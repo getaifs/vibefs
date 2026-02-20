@@ -3,7 +3,6 @@ pub mod git;
 pub mod gitignore;
 pub mod names;
 pub mod nfs;
-pub mod tui;
 pub mod commands;
 pub mod cwd_validation;
 pub mod daemon_client;

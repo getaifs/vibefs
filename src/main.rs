@@ -6,7 +6,6 @@ use tracing_subscriber::EnvFilter;
 use vibefs::commands;
 use vibefs::daemon_client::{self, DaemonClient};
 use vibefs::daemon_ipc::DaemonResponse;
-use vibefs::tui;
 
 /// Build version string with git hash
 fn version_string() -> &'static str {
@@ -89,16 +88,17 @@ enum Commands {
         force: bool,
     },
 
-    /// Promote a vibe session into a Git commit
-    Promote {
-        /// Session to promote (auto-detected if in mount or single session)
+    /// Commit session changes to a Git ref
+    #[command(alias = "promote")]
+    Commit {
+        /// Session to commit (auto-detected if in mount or single session)
         session: Option<String>,
 
-        /// Promote all sessions with dirty files
+        /// Commit all sessions with dirty files
         #[arg(short, long)]
         all: bool,
 
-        /// Only promote files matching these glob patterns
+        /// Only commit files matching these glob patterns
         #[arg(long, value_delimiter = ',')]
         only: Option<Vec<String>>,
 
@@ -107,16 +107,17 @@ enum Commands {
         message: Option<String>,
     },
 
-    /// Close a vibe session (unmount and clean up)
-    Close {
-        /// Session to close (auto-detected if in mount or single session)
+    /// Kill a session (unmount and clean up)
+    #[command(alias = "close")]
+    Kill {
+        /// Session to kill (auto-detected if in mount or single session)
         session: Option<String>,
 
-        /// Force close without confirmation (even with dirty files)
+        /// Force kill without confirmation (even with dirty files)
         #[arg(short, long)]
         force: bool,
 
-        /// Close all sessions
+        /// Kill all sessions
         #[arg(short, long)]
         all: bool,
 
@@ -125,8 +126,15 @@ enum Commands {
         purge: bool,
     },
 
-    /// Launch the TUI dashboard
-    Dashboard,
+    /// Attach to an existing session (enter shell at mount point)
+    Attach {
+        /// Session to attach to (auto-detected if possible)
+        session: Option<String>,
+
+        /// Command to execute instead of interactive shell
+        #[arg(short, long)]
+        command: Option<String>,
+    },
 
     /// Daemon management commands
     Daemon {
@@ -152,8 +160,9 @@ enum Commands {
         no_pager: bool,
     },
 
-    /// Show daemon and session status
-    Status {
+    /// List sessions and show status
+    #[command(name = "ls", alias = "status")]
+    Ls {
         /// Show details for a specific session (auto-detected if in mount or single session)
         session: Option<String>,
 
@@ -181,8 +190,12 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DaemonAction {
-    /// Start the daemon in foreground (for debugging)
-    Start,
+    /// Start the daemon (background by default)
+    Start {
+        /// Run in foreground for debugging
+        #[arg(short, long)]
+        foreground: bool,
+    },
     /// Stop the running daemon
     Stop,
     /// Show daemon status
@@ -201,17 +214,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let repo_path = vibefs::platform::get_effective_repo_path(&cli.repo);
 
-    // Handle no subcommand: auto-init if needed, then launch dashboard
+    // Handle no subcommand: show status overview by default
     let command = match cli.command {
         Some(cmd) => cmd,
         None => {
-            // Auto-init if .vibe/ doesn't exist
-            let vibe_dir = repo_path.join(".vibe");
-            if !vibe_dir.exists() {
-                commands::init::init(&repo_path).await?;
-            }
-            // Launch dashboard
-            tui::run_dashboard(&repo_path).await?;
+            commands::status::status(&repo_path, None, false, false).await?;
             return Ok(());
         }
     };
@@ -301,7 +308,7 @@ async fn main() -> Result<()> {
             let session = commands::require_session(&repo_path, session)?;
             commands::rebase::rebase(&repo_path, &session, force).await?;
         }
-        Commands::Promote { session, all, only, message } => {
+        Commands::Commit { session, all, only, message } => {
             if all {
                 commands::promote::promote_all(&repo_path, message.as_deref()).await?;
             } else {
@@ -309,16 +316,14 @@ async fn main() -> Result<()> {
                 commands::promote::promote(&repo_path, &id, only, message.as_deref()).await?;
             }
         }
-        Commands::Close { session, force, all, purge } => {
+        Commands::Kill { session, force, all, purge } => {
             if all {
-                // Close all sessions
                 commands::purge::purge(&repo_path, force).await?;
                 if purge {
-                    // Also delete .vibe directory
                     let vibe_dir = repo_path.join(".vibe");
                     if vibe_dir.exists() {
                         std::fs::remove_dir_all(&vibe_dir)?;
-                        println!("✓ Removed .vibe directory");
+                        println!("Removed .vibe directory");
                     }
                 }
             } else {
@@ -326,18 +331,59 @@ async fn main() -> Result<()> {
                 commands::close::close(&repo_path, &session, force, false).await?;
             }
         }
+        Commands::Attach { session, command } => {
+            let session = commands::require_session(&repo_path, session)?;
+
+            // Ensure daemon is running and session is exported
+            daemon_client::ensure_daemon_running(&repo_path).await?;
+            let mut client = DaemonClient::connect(&repo_path).await?;
+            match client.export_session(&session).await? {
+                DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
+                    // Ensure NFS is mounted
+                    if let Err(e) = commands::spawn::mount_nfs(&mount_point, nfs_port) {
+                        eprintln!("Warning: mount issue: {}", e);
+                    }
+
+                    if let Some(cmd) = command {
+                        let status = std::process::Command::new("sh")
+                            .args(["-c", &cmd])
+                            .current_dir(&mount_point)
+                            .status()?;
+                        if !status.success() {
+                            std::process::exit(status.code().unwrap_or(1));
+                        }
+                    } else {
+                        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                        let status = std::process::Command::new(&shell)
+                            .current_dir(&mount_point)
+                            .status()?;
+                        if !status.success() {
+                            std::process::exit(status.code().unwrap_or(1));
+                        }
+                    }
+                }
+                DaemonResponse::Error { message } => {
+                    anyhow::bail!("Daemon error: {}", message);
+                }
+                _ => {
+                    anyhow::bail!("Unexpected daemon response");
+                }
+            }
+        }
         Commands::Diff { session, stat, color, no_pager } => {
             let session = commands::require_session(&repo_path, session)?;
             let color_opt = color.parse().unwrap_or(commands::diff::ColorOption::Auto);
             commands::diff::diff(&repo_path, &session, stat, color_opt, no_pager).await?;
         }
-        Commands::Dashboard => {
-            tui::run_dashboard(&repo_path).await?;
-        }
         Commands::Daemon { action } => match action {
-            DaemonAction::Start => {
-                println!("Starting daemon in foreground mode...");
-                daemon_client::start_daemon_foreground(&repo_path).await?;
+            DaemonAction::Start { foreground } => {
+                if foreground {
+                    println!("Starting daemon in foreground mode...");
+                    daemon_client::start_daemon_foreground(&repo_path).await?;
+                } else {
+                    daemon_client::ensure_daemon_running(&repo_path).await?;
+                    println!("Daemon started.");
+                }
             }
             DaemonAction::Stop => {
                 if DaemonClient::is_running(&repo_path).await {
@@ -377,7 +423,7 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Status { session, conflicts, verbose, path, json } => {
+        Commands::Ls { session, conflicts, verbose, path, json } => {
             if path {
                 // Path-only mode: print mount path for scripting
                 let session = commands::require_session(&repo_path, session)?;

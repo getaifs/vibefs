@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Validates that the current working directory is appropriate for running vibe commands.
 ///
@@ -14,8 +13,31 @@ pub fn validate_cwd() -> Result<PathBuf> {
     let current_dir = env::current_dir()
         .context("Failed to get current working directory")?;
 
-    // First, check if we're in a git repository and get the root
-    let repo_root = get_git_root(&current_dir)?;
+    // If we're inside a vibe mount, use the original repo path and allow any subdir
+    if let Some(origin) = crate::platform::detect_vibe_mount_origin(&current_dir) {
+        eprintln!(
+            "Info: Detected VibeFS mount. Using repository at: {}",
+            origin.display()
+        );
+        return Ok(origin);
+    }
+
+    // If this looks like a mount path but isn't registered, give a friendly warning
+    let mounts_dir = crate::platform::get_vibe_mounts_dir();
+    if current_dir.starts_with(&mounts_dir) {
+        return Err(anyhow!(
+            "Error: This path looks like a VibeFS mount, but it isn't registered\n\n\
+            Current directory: {}\n\
+            Mounts directory:  {}\n\n\
+            Hint: Re-run 'vibe new <session>' from the repo root, or run\n\
+            'vibe status' from the repo root to repair the mount registry.",
+            current_dir.display(),
+            mounts_dir.display()
+        ));
+    }
+
+    // Find repository root without invoking git
+    let repo_root = find_repo_root(&current_dir)?;
 
     // Check if we're inside a session directory (most problematic)
     if is_in_session_directory(&current_dir) {
@@ -59,35 +81,31 @@ pub fn validate_cwd() -> Result<PathBuf> {
     Ok(repo_root)
 }
 
-/// Gets the git repository root using `git rev-parse --show-toplevel`
-fn get_git_root(from_dir: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .current_dir(from_dir)
-        .output()
-        .context("Failed to execute git command")?;
+/// Finds the git repository root by walking up to a directory containing .git
+fn find_repo_root(from_dir: &Path) -> Result<PathBuf> {
+    let mut current = from_dir;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "Error: Current directory is not a Git repository\n\n\
-            Current directory: {}\n\n\
-            VibeFS requires a Git repository to operate.\n\n\
-            Hint: Navigate to your Git repository root before running vibe commands:\n  \
-            cd /path/to/your/repo\n  \
-            vibe init\n\n\
-            Git error: {}",
-            from_dir.display(),
-            stderr.trim()
-        ));
+    loop {
+        let git_path = current.join(".git");
+        if git_path.exists() {
+            return Ok(current.to_path_buf());
+        }
+
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
     }
 
-    let root_str = String::from_utf8(output.stdout)
-        .context("Git output is not valid UTF-8")?;
-    let root_path = PathBuf::from(root_str.trim());
-
-    Ok(root_path)
+    Err(anyhow!(
+        "Error: Current directory is not a Git repository\n\n\
+        Current directory: {}\n\n\
+        VibeFS requires a Git repository to operate.\n\n\
+        Hint: Navigate to your Git repository root before running vibe commands:\n  \
+        cd /path/to/your/repo\n  \
+        vibe init",
+        from_dir.display()
+    ))
 }
 
 /// Checks if the current directory is inside a .vibe/sessions/ directory
@@ -101,6 +119,7 @@ fn is_in_session_directory(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -116,16 +135,16 @@ mod tests {
     }
 
     #[test]
-    fn test_get_git_root_not_in_repo() {
+    fn test_find_repo_root_not_in_repo() {
         let temp = TempDir::new().unwrap();
-        let result = get_git_root(temp.path());
+        let result = find_repo_root(temp.path());
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("not a Git repository"));
     }
 
     #[test]
-    fn test_get_git_root_in_repo() {
+    fn test_find_repo_root_in_repo() {
         let temp = TempDir::new().unwrap();
         let repo_path = temp.path();
 
@@ -136,14 +155,14 @@ mod tests {
             .output()
             .unwrap();
 
-        let result = get_git_root(repo_path);
+        let result = find_repo_root(repo_path);
         assert!(result.is_ok());
         let root = result.unwrap();
         assert_eq!(root.canonicalize().unwrap(), repo_path.canonicalize().unwrap());
     }
 
     #[test]
-    fn test_get_git_root_in_subdirectory() {
+    fn test_find_repo_root_in_subdirectory() {
         let temp = TempDir::new().unwrap();
         let repo_path = temp.path();
 
@@ -158,7 +177,7 @@ mod tests {
         let subdir = repo_path.join("src").join("commands");
         fs::create_dir_all(&subdir).unwrap();
 
-        let result = get_git_root(&subdir);
+        let result = find_repo_root(&subdir);
         assert!(result.is_ok());
         let root = result.unwrap();
         assert_eq!(root.canonicalize().unwrap(), repo_path.canonicalize().unwrap());

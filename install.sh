@@ -92,11 +92,11 @@ install_binary() {
     mv "$temp_dir/${BINARY_NAME}" "$INSTALL_DIR/${BINARY_NAME}"
     chmod +x "$INSTALL_DIR/${BINARY_NAME}"
 
-    # Install helper tools if present
-    if [ -f "$temp_dir/mark_dirty" ]; then
-        mv "$temp_dir/mark_dirty" "$INSTALL_DIR/mark_dirty"
-        chmod +x "$INSTALL_DIR/mark_dirty"
-        info "Installed mark_dirty helper"
+    # Install vibed daemon if present
+    if [ -f "$temp_dir/vibed" ]; then
+        mv "$temp_dir/vibed" "$INSTALL_DIR/vibed"
+        chmod +x "$INSTALL_DIR/vibed"
+        info "Installed vibed daemon"
     fi
 }
 

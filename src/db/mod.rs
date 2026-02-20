@@ -190,6 +190,34 @@ impl MetadataStore {
         Ok(inodes)
     }
 
+    /// Clone this metadata store to a new location.
+    /// Used to create per-session copies from the base template.
+    /// If the destination already exists, opens it directly (idempotent re-export).
+    pub fn clone_to<P: AsRef<Path>>(&self, dest_path: P) -> Result<Self> {
+        let dest_path = dest_path.as_ref();
+
+        // If destination already exists, just open it (idempotent)
+        if dest_path.exists() {
+            return Self::open(dest_path);
+        }
+
+        let dest = Self::open(dest_path)?;
+
+        // Copy all inodes
+        let all_inodes = self.get_all_inodes()?;
+        for (inode_id, metadata) in &all_inodes {
+            dest.put_inode(*inode_id, metadata)?;
+        }
+
+        // Copy the inode counter
+        let counter_key = b"counter:inode";
+        if let Some(counter_val) = self.db.get(counter_key)? {
+            dest.db.put(counter_key, counter_val)?;
+        }
+
+        Ok(dest)
+    }
+
     /// Clear all dirty marks
     pub fn clear_dirty(&self) -> Result<()> {
         let prefix = b"dirty:";

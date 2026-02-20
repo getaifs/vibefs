@@ -68,7 +68,7 @@ OUTPUT=$("$VIBE" -r "$REPO1" init 2>&1)
 echo "$OUTPUT" | grep -q "initialized successfully"
 check $? "init succeeded"
 
-OUTPUT=$("$VIBE" -r "$REPO1" spawn test-session 2>&1)
+OUTPUT=$("$VIBE" -r "$REPO1" new test-session -c "true" 2>&1)
 echo "$OUTPUT" | grep -q "spawned successfully"
 check $? "spawn succeeded"
 
@@ -94,7 +94,7 @@ touch "$REPO2/.vibe/vibed.sock"
 echo "  Created stale socket file"
 
 # Try to spawn - should clean up stale socket and succeed
-OUTPUT=$("$VIBE" -r "$REPO2" spawn stale-test 2>&1)
+OUTPUT=$("$VIBE" -r "$REPO2" new stale-test -c "true" 2>&1)
 if echo "$OUTPUT" | grep -q "Cleaning up stale socket"; then
     echo "  PASS: Detected and cleaned stale socket"
     PASS=$((PASS + 1))
@@ -123,7 +123,7 @@ echo "999999" > "$REPO3/.vibe/vibed.pid"
 echo "  Created stale PID file (pid 999999)"
 
 # Try to spawn - should clean up stale PID and succeed
-OUTPUT=$("$VIBE" -r "$REPO3" spawn pid-test 2>&1)
+OUTPUT=$("$VIBE" -r "$REPO3" new pid-test -c "true" 2>&1)
 if echo "$OUTPUT" | grep -q "Cleaning up stale PID"; then
     echo "  PASS: Detected and cleaned stale PID file"
     PASS=$((PASS + 1))
@@ -150,12 +150,12 @@ setup_test_repo "$REPO4B"
 "$VIBE" -r "$REPO4B" init >/dev/null 2>&1
 
 # Start daemon in repo4a
-OUTPUT=$("$VIBE" -r "$REPO4A" spawn session-a 2>&1)
+OUTPUT=$("$VIBE" -r "$REPO4A" new session-a -c "true" 2>&1)
 echo "$OUTPUT" | grep -q "spawned successfully"
 check $? "repo4a daemon started"
 
 # Start daemon in repo4b (should be independent)
-OUTPUT=$("$VIBE" -r "$REPO4B" spawn session-b 2>&1)
+OUTPUT=$("$VIBE" -r "$REPO4B" new session-b -c "true" 2>&1)
 echo "$OUTPUT" | grep -q "spawned successfully"
 check $? "repo4b daemon started"
 
@@ -184,7 +184,7 @@ mkdir -p "$REPO5/.vibe"
 touch "$REPO5/.vibe/vibed.sock"
 echo "999999" > "$REPO5/.vibe/vibed.pid"
 
-OUTPUT=$("$VIBE" -r "$REPO5" spawn diagnostic-test 2>&1)
+OUTPUT=$("$VIBE" -r "$REPO5" new diagnostic-test -c "true" 2>&1)
 if echo "$OUTPUT" | grep -q "Starting daemon:"; then
     echo "  PASS: Shows which binary is being used"
     PASS=$((PASS + 1))

@@ -12,46 +12,53 @@ const VIBEFS_WORKFLOW_DOCS: &str = r#"
 
 This repository uses VibeFS for managing parallel AI agent workflows on Git.
 
-### Core Workflow
+### Quick Start (for AI agents)
 
-1. **Initialize** (first time only):
-   ```bash
-   vibe init
-   ```
+```bash
+# Create workspace and enter shell
+vibe new my-session
 
-2. **Spawn your workspace**:
-   ```bash
-   vibe spawn <session-name>
-   ```
+# Edit files normally (changes are auto-tracked)
+echo "hello" > file.txt
 
-3. **Work in the NFS mount**:
-   ```bash
-   vibe sh -s <session-name>  # Opens shell in mount
-   # Or: vibe launch claude --session <session-name>
-   ```
-   Changes are automatically tracked.
+# Checkpoint progress (optional)
+vibe save
 
-4. **Promote to Git**:
-   ```bash
-   vibe promote <session-name>
-   ```
+# Commit changes to Git ref
+vibe promote
 
-5. **Merge to main**:
-   ```bash
-   git merge refs/vibes/<session-name>
-   ```
+# Exit shell when done
+```
 
-6. **Close session**:
-   ```bash
-   vibe close <session-name>
-   ```
+### Working Inside the Mount
+
+When you're inside a VibeFS mount (your session workspace):
+
+- **All `vibe` commands auto-detect your session** - no need to specify session name
+- **Git commands won't work** - the mount doesn't include `.git`
+- Use `vibe diff` instead of `git diff`
+- Use `vibe promote` to commit changes (creates refs/vibes/<session>)
+- Use `vibe save` / `vibe undo` for checkpoints
 
 ### Key Commands
 
-- `vibe status` - Show daemon and session status
-- `vibe inspect <session>` - Detailed session info
-- `vibe diff <session>` - Show changes
-- `vibe snapshot <session>` - Create backup
+| From inside mount | From repo root |
+|-------------------|----------------|
+| `vibe status` | `vibe status <session>` |
+| `vibe diff` | `vibe diff <session>` |
+| `vibe save` | `vibe save -s <session>` |
+| `vibe undo` | `vibe undo -s <session>` |
+| `vibe promote` | `vibe promote <session>` |
+
+### Full Workflow
+
+1. **Initialize** (first time): `vibe init`
+2. **Create session**: `vibe new <name>` (spawns + enters shell)
+3. **Work**: Edit files, run builds, tests
+4. **Checkpoint**: `vibe save` (optional backup)
+5. **Commit**: `vibe promote` (creates Git ref)
+6. **Merge**: `git merge refs/vibes/<name>` (from repo root)
+7. **Cleanup**: `vibe close` or exit shell
 "#;
 
 /// Initialize VibeFS for a Git repository
@@ -416,7 +423,7 @@ mod tests {
 
         let content = fs::read_to_string(repo_path.join("AGENTS.md")).unwrap();
         assert!(content.contains("## VibeFS Workflow"));
-        assert!(content.contains("vibe spawn"));
+        assert!(content.contains("vibe new"));
         assert!(content.contains("vibe promote"));
     }
 
@@ -437,7 +444,7 @@ mod tests {
         let content = fs::read_to_string(repo_path.join("CLAUDE.md")).unwrap();
         assert!(content.contains("# Existing Content"));
         assert!(content.contains("## VibeFS Workflow"));
-        assert!(content.contains("vibe spawn"));
+        assert!(content.contains("vibe new"));
     }
 
     #[tokio::test]

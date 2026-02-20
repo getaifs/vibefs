@@ -57,4 +57,8 @@ cargo build --release   # Build release binaries
 ./dev_scripts/install.sh  # Install to ~/.local/bin
 ```
 
+* Always use dev_scripts/bump.sh to manage versioning, and releaes.sh to release.
+* Always run workflow_tests to ensure everything works, before releasing.
+* When running on local dev machine, make sure to install and run `vibe` to ensure the binary actually works.
+
 See `dev_scripts/README.md` for release process.

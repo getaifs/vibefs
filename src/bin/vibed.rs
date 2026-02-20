@@ -30,7 +30,9 @@ struct Session {
     mount_point: PathBuf,
     nfs_port: u16,
     created_at: Instant,
-    shutdown_tx: tokio::sync::broadcast::Sender<()>
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    #[allow(dead_code)]
+    metadata: Arc<RwLock<MetadataStore>>,
 }
 
 /// Daemon state shared across handlers
@@ -191,71 +193,84 @@ async fn handle_client(
 
                     match setup_session_resources(&session_dir, &mount_point) {
                         Ok(_) => {
-                            // Set up artifact symlinks before creating NFS server
-                            // This registers them in metadata so NFS can expose them
-                            if let Err(e) = setup_artifact_symlinks(
-                                &session_dir,
-                                &vibe_id,
-                                &state_guard.metadata
-                            ).await {
-                                eprintln!("[vibed] Warning: Failed to setup artifact symlinks: {}", e);
-                                // Non-fatal - continue with spawn
-                            }
+                            // Create per-session metadata store (clone from base)
+                            let session_db_path = session_dir.join("metadata.db");
+                            let session_metadata = {
+                                let base_store = state_guard.metadata.read().await;
+                                base_store.clone_to(&session_db_path)
+                            };
 
-                            let nfs = VibeNFS::new(
-                                state_guard.metadata.clone(),
-                                state_guard.git.clone(),
-                                session_dir.clone(),
-                                state_guard.repo_path.clone(),
-                                vibe_id.clone()
-                            );
+                            match session_metadata {
+                                Err(e) => DaemonResponse::Error {
+                                    message: format!("Failed to create session metadata: {}", e),
+                                },
+                                Ok(session_store) => {
+                                    let session_metadata = Arc::new(RwLock::new(session_store));
 
-                            if let Err(e) = nfs.build_directory_cache().await {
-                                DaemonResponse::Error {
-                                    message: format!("Failed to build cache: {}", e),
-                                }
-                            } else {
-                                // Bind NFS listener
-                                match NFSTcpListener::bind("127.0.0.1:0", nfs).await {
-                                    Ok(listener) => {
-                                        let port = listener.get_listen_port();
-                                        let (sess_shutdown_tx, mut sess_shutdown_rx) = tokio::sync::broadcast::channel(1);
-                                        let vid = vibe_id.clone();
-                                        
-                                        // Spawn NFS server task
-                                        tokio::spawn(async move {
-                                            eprintln!("[vibed] NFS server running for {} on port {}", vid, port);
-                                            tokio::select! {
-                                                res = listener.handle_forever() => {
-                                                    if let Err(e) = res {
-                                                        eprintln!("[vibed] NFS server error for {}: {}", vid, e);
+                                    // Set up artifact symlinks using session-specific metadata
+                                    if let Err(e) = setup_artifact_symlinks(
+                                        &session_dir,
+                                        &vibe_id,
+                                        &session_metadata
+                                    ).await {
+                                        eprintln!("[vibed] Warning: Failed to setup artifact symlinks: {}", e);
+                                    }
+
+                                    let nfs = VibeNFS::new(
+                                        session_metadata.clone(),
+                                        state_guard.git.clone(),
+                                        session_dir.clone(),
+                                        state_guard.repo_path.clone(),
+                                        vibe_id.clone()
+                                    );
+
+                                    if let Err(e) = nfs.build_directory_cache().await {
+                                        DaemonResponse::Error {
+                                            message: format!("Failed to build cache: {}", e),
+                                        }
+                                    } else {
+                                        match NFSTcpListener::bind("127.0.0.1:0", nfs).await {
+                                            Ok(listener) => {
+                                                let port = listener.get_listen_port();
+                                                let (sess_shutdown_tx, mut sess_shutdown_rx) = tokio::sync::broadcast::channel(1);
+                                                let vid = vibe_id.clone();
+
+                                                tokio::spawn(async move {
+                                                    eprintln!("[vibed] NFS server running for {} on port {}", vid, port);
+                                                    tokio::select! {
+                                                        res = listener.handle_forever() => {
+                                                            if let Err(e) = res {
+                                                                eprintln!("[vibed] NFS server error for {}: {}", vid, e);
+                                                            }
+                                                        }
+                                                        _ = sess_shutdown_rx.recv() => {
+                                                            eprintln!("[vibed] Stopping NFS server for {}", vid);
+                                                        }
                                                     }
-                                                }
-                                                _ = sess_shutdown_rx.recv() => {
-                                                    eprintln!("[vibed] Stopping NFS server for {}", vid);
+                                                });
+
+                                                let session = Session {
+                                                    vibe_id: vibe_id.clone(),
+                                                    session_dir,
+                                                    mount_point: mount_point.clone(),
+                                                    nfs_port: port,
+                                                    created_at: Instant::now(),
+                                                    shutdown_tx: sess_shutdown_tx,
+                                                    metadata: session_metadata,
+                                                };
+
+                                                state_guard.sessions.insert(vibe_id.clone(), session);
+
+                                                DaemonResponse::SessionExported {
+                                                    vibe_id,
+                                                    nfs_port: port,
+                                                    mount_point: mount_point.display().to_string(),
                                                 }
                                             }
-                                        });
-
-                                        let session = Session {
-                                            vibe_id: vibe_id.clone(),
-                                            session_dir,
-                                            mount_point: mount_point.clone(),
-                                            nfs_port: port,
-                                            created_at: Instant::now(),
-                                            shutdown_tx: sess_shutdown_tx,
-                                        };
-
-                                        state_guard.sessions.insert(vibe_id.clone(), session);
-
-                                        DaemonResponse::SessionExported {
-                                            vibe_id,
-                                            nfs_port: port,
-                                            mount_point: mount_point.display().to_string(),
+                                            Err(e) => DaemonResponse::Error {
+                                                message: format!("Failed to bind NFS port: {}", e),
+                                            }
                                         }
-                                    }
-                                    Err(e) => DaemonResponse::Error {
-                                        message: format!("Failed to bind NFS port: {}", e),
                                     }
                                 }
                             }

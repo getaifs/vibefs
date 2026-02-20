@@ -80,20 +80,18 @@ async fn show_overview<P: AsRef<Path>>(repo_path: P, json_output: bool) -> Resul
 
             // Get active sessions
             if let Ok(DaemonResponse::Sessions { sessions }) = client.list_sessions().await {
-                // Get dirty counts for each session
-                let db_path = vibe_dir.join("metadata.db");
-                let dirty_counts = if db_path.exists() {
-                    if let Ok(store) = MetadataStore::open_readonly(&db_path) {
-                        get_dirty_counts_by_session(&store, repo_path)
-                    } else {
-                        HashMap::new()
-                    }
-                } else {
-                    HashMap::new()
-                };
-
                 for sess in sessions {
-                    // Load spawn info to get base commit
+                    // Get dirty count from per-session metadata store
+                    let dirty_count = {
+                        let session_db = vibe_dir.join("sessions").join(&sess.vibe_id).join("metadata.db");
+                        let db_path = if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") };
+                        if let Ok(store) = MetadataStore::open_readonly(&db_path) {
+                            store.get_dirty_paths().map(|p| p.len()).unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    };
+
                     let spawn_info = SpawnInfo::load(repo_path, &sess.vibe_id).ok();
                     let base_commit = spawn_info.as_ref().and_then(|s| s.spawn_commit.clone());
                     let behind_head = match (&base_commit, &head_commit) {
@@ -103,7 +101,7 @@ async fn show_overview<P: AsRef<Path>>(repo_path: P, json_output: bool) -> Resul
 
                     output.active_sessions.push(SessionSummary {
                         id: sess.vibe_id.clone(),
-                        dirty_count: dirty_counts.get(&sess.vibe_id).copied().unwrap_or(0),
+                        dirty_count,
                         uptime_secs: sess.uptime_secs,
                         mount_point: sess.mount_point,
                         base_commit,
@@ -166,12 +164,15 @@ async fn show_session_details<P: AsRef<Path>>(
         _ => None,
     };
 
-    // Get dirty files (read-only to avoid lock conflicts with daemon)
-    let db_path = vibe_dir.join("metadata.db");
+    // Get dirty files from per-session store (fallback to base)
+    let db_path = {
+        let session_db = vibe_dir.join("sessions").join(session_id).join("metadata.db");
+        if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") }
+    };
     let dirty_files = if db_path.exists() {
         match MetadataStore::open_readonly(&db_path) {
             Ok(store) => store.get_dirty_paths()?,
-            Err(_) => Vec::new(), // Fallback if read-only fails
+            Err(_) => Vec::new(),
         }
     } else {
         Vec::new()
@@ -225,20 +226,6 @@ async fn show_conflicts_status<P: AsRef<Path>>(repo_path: P, json_output: bool) 
     let repo_path = repo_path.as_ref();
     let vibe_dir = repo_path.join(".vibe");
 
-    let db_path = vibe_dir.join("metadata.db");
-    if !db_path.exists() {
-        if json_output {
-            println!(r#"{{"conflicts": []}}"#);
-        } else {
-            println!("No conflicts detected.");
-        }
-        return Ok(());
-    }
-
-    let store = MetadataStore::open_readonly(&db_path)
-        .map_err(|_| anyhow::anyhow!("Cannot open metadata store"))?;
-    let dirty_paths = store.get_dirty_paths()?;
-
     // Get all sessions
     let sessions_dir = vibe_dir.join("sessions");
     let sessions: Vec<String> = if sessions_dir.exists() {
@@ -252,17 +239,20 @@ async fn show_conflicts_status<P: AsRef<Path>>(repo_path: P, json_output: bool) 
         Vec::new()
     };
 
-    // Check which sessions have each dirty file
+    // Collect dirty paths per session from per-session metadata stores
     let mut file_sessions: HashMap<String, Vec<String>> = HashMap::new();
 
-    for path in dirty_paths {
-        for session in &sessions {
-            let session_file = sessions_dir.join(session).join(&path);
-            if session_file.exists() {
-                file_sessions
-                    .entry(path.clone())
-                    .or_default()
-                    .push(session.clone());
+    for session in &sessions {
+        let session_db = sessions_dir.join(session).join("metadata.db");
+        let db_path = if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") };
+        if let Ok(store) = MetadataStore::open_readonly(&db_path) {
+            if let Ok(dirty_paths) = store.get_dirty_paths() {
+                for path in dirty_paths {
+                    file_sessions
+                        .entry(path)
+                        .or_default()
+                        .push(session.clone());
+                }
             }
         }
     }
@@ -290,17 +280,6 @@ async fn show_conflicts_status<P: AsRef<Path>>(repo_path: P, json_output: bool) 
     }
 
     Ok(())
-}
-
-fn get_dirty_counts_by_session(store: &MetadataStore, _repo_path: &Path) -> HashMap<String, usize> {
-    // For now, return total dirty count for all sessions
-    // TODO: Track dirty files per session in metadata store
-    let mut counts = HashMap::new();
-    if let Ok(dirty) = store.get_dirty_paths() {
-        // Assume single session for now
-        counts.insert("default".to_string(), dirty.len());
-    }
-    counts
 }
 
 fn find_snapshots(sessions_dir: &Path, session: &str) -> Result<Vec<String>> {

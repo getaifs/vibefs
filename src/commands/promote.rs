@@ -46,8 +46,11 @@ pub async fn promote<P: AsRef<Path>>(
 
     println!("Promoting vibe session: {}", vibe_id);
 
-    // Open metadata store (read-only to avoid lock conflicts with daemon)
-    let metadata_path = vibe_dir.join("metadata.db");
+    // Open per-session metadata store (fallback to base for backward compat)
+    let metadata_path = {
+        let session_db = vibe_dir.join("sessions").join(vibe_id).join("metadata.db");
+        if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") }
+    };
     let metadata = MetadataStore::open_readonly(&metadata_path)
         .context("Failed to open metadata store. Is the daemon running?")?;
 
