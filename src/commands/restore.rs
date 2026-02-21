@@ -103,6 +103,84 @@ pub async fn restore<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Discard all session changes and reset to base commit (clean state)
+pub async fn reset_hard<P: AsRef<Path>>(
+    repo_path: P,
+    session: &str,
+    no_backup: bool,
+) -> Result<()> {
+    let _validated_root = cwd_validation::validate_cwd()
+        .context("Cannot reset session")?;
+
+    let repo_path = repo_path.as_ref();
+    let vibe_dir = repo_path.join(".vibe");
+    let sessions_dir = vibe_dir.join("sessions");
+    let session_dir = sessions_dir.join(session);
+
+    if !session_dir.exists() {
+        anyhow::bail!(
+            "Session '{}' not found. Run 'vibe ls' to see active sessions.",
+            session
+        );
+    }
+
+    // Auto-backup current state before reset (unless --no-backup)
+    if !no_backup {
+        let backup_name = format!("pre-reset-{}", Utc::now().format("%Y%m%d_%H%M%S"));
+        let backup_dir = sessions_dir.join(format!("{}_snapshot_{}", session, backup_name));
+
+        println!("Backing up current state to checkpoint '{}'...", backup_name);
+
+        #[cfg(target_os = "macos")]
+        {
+            copy_with_clonefile(&session_dir, &backup_dir)?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            copy_with_reflink(&session_dir, &backup_dir)?;
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            copy_recursive(&session_dir, &backup_dir)?;
+        }
+    }
+
+    // Remove all files in session dir except metadata.db and session metadata
+    println!("Discarding all changes in session '{}'...", session);
+    for entry in std::fs::read_dir(&session_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Keep metadata.db (per-session RocksDB)
+        if name == "metadata.db" {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+
+    // Clear dirty tracking in per-session metadata store
+    let session_db = session_dir.join("metadata.db");
+    let db_path = if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") };
+    if db_path.exists() {
+        let store = MetadataStore::open(&db_path)
+            .context("Failed to open metadata store. If daemon is running, stop it first with 'vibe daemon stop'")?;
+        store.clear_dirty()?;
+    }
+
+    println!("Session '{}' reset to base commit.", session);
+    if !no_backup {
+        println!("  (backup saved — use 'vibe undo' to see checkpoints)");
+    }
+
+    Ok(())
+}
+
 /// Find a snapshot by name (handles different naming formats)
 fn find_snapshot(sessions_dir: &Path, session: &str, snapshot_name: &str) -> Result<std::path::PathBuf> {
     // Try exact match first: <session>_snapshot_<name>

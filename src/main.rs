@@ -34,7 +34,7 @@ Sessions:
 
 Versioning:
   save      Create a checkpoint of session state
-  undo      Restore session from a checkpoint
+  undo      Restore from checkpoint, or reset (--hard)
   commit    Commit session changes to a Git branch
   diff      Show unified diff of session changes
 
@@ -94,7 +94,7 @@ enum Commands {
     },
 
     /// Restore session from a checkpoint
-    #[command(hide = true)]
+    #[command(alias = "restore", hide = true)]
     Undo {
         /// Snapshot name to restore (lists available if not provided)
         name: Option<String>,
@@ -106,6 +106,10 @@ enum Commands {
         /// Skip automatic backup of current state
         #[arg(long)]
         no_backup: bool,
+
+        /// Discard all changes and reset session to base commit
+        #[arg(long)]
+        hard: bool,
     },
 
     /// Rebase session to current HEAD (update base commit)
@@ -326,9 +330,11 @@ async fn main() -> Result<()> {
             });
             commands::snapshot::snapshot_with_name(&repo_path, &session, &snapshot_name).await?;
         }
-        Commands::Undo { name, session, no_backup } => {
+        Commands::Undo { name, session, no_backup, hard } => {
             let session = commands::require_session(&repo_path, session)?;
-            if let Some(snapshot_name) = name {
+            if hard {
+                commands::restore::reset_hard(&repo_path, &session, no_backup).await?;
+            } else if let Some(snapshot_name) = name {
                 commands::restore::restore(&repo_path, &session, &snapshot_name, no_backup).await?;
             } else {
                 // List available snapshots
