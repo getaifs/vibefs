@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::daemon_ipc::{get_socket_path, DaemonRequest, DaemonResponse};
-use crate::VERSION;
+use crate::VERSION_FULL;
 
 /// Clean up stale daemon state (socket, PID file, log) if daemon is not running
 async fn cleanup_stale_daemon_state(socket_path: &PathBuf, pid_path: &PathBuf, log_path: &PathBuf) {
@@ -76,11 +76,11 @@ impl DaemonClient {
         match client.request(DaemonRequest::Ping).await? {
             DaemonResponse::Pong { version } => {
                 if let Some(daemon_version) = version {
-                    if daemon_version != VERSION {
+                    if daemon_version != VERSION_FULL {
                         anyhow::bail!(
-                            "Version mismatch: vibe CLI is v{} but daemon is v{}.\n\
+                            "Version mismatch: vibe CLI is {} but daemon is {}.\n\
                              Run 'vibe daemon stop' and retry to start a new daemon.",
-                            VERSION,
+                            VERSION_FULL,
                             daemon_version
                         );
                     }
@@ -158,10 +158,10 @@ pub async fn ensure_daemon_running(repo_path: &Path) -> Result<()> {
         // Check version
         if let Ok(DaemonResponse::Pong { version }) = client.request(DaemonRequest::Ping).await {
             if let Some(daemon_version) = version {
-                if daemon_version != VERSION {
+                if daemon_version != VERSION_FULL {
                     eprintln!(
                         "Warning: Running daemon is v{} but CLI is v{}. Stopping old daemon...",
-                        daemon_version, VERSION
+                        daemon_version, VERSION_FULL
                     );
                     // Stop the old daemon
                     let _ = client.shutdown().await;

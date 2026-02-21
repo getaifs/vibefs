@@ -210,14 +210,14 @@ async fn main() -> Result<()> {
     // Handle --version / -V manually so we can show daemon version too
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("vibe {}", version_string());
+        println!("vibe  {}", version_string());
         // Try to show daemon version if running
         let repo_path = vibefs::platform::get_effective_repo_path(std::path::Path::new("."));
         if DaemonClient::is_running(&repo_path).await {
             if let Ok(mut client) = DaemonClient::connect(&repo_path).await {
                 if let Ok(DaemonResponse::Status { version, .. }) = client.status().await {
                     if let Some(v) = version {
-                        if v != vibefs::VERSION {
+                        if v != version_string() {
                             println!("vibed {} (restart daemon to match)", v);
                         } else {
                             println!("vibed {}", v);

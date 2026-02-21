@@ -11,6 +11,9 @@ pub mod platform;
 /// Package version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Full version string with git hash, e.g. "0.9.3 (b7c8ef0)"
+pub const VERSION_FULL: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")");
+
 /// IPC message types for daemon communication
 pub mod daemon_ipc {
     use serde::{Deserialize, Serialize};

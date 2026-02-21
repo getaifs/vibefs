@@ -17,7 +17,7 @@ use vibefs::db::MetadataStore;
 use vibefs::git::GitRepo;
 use vibefs::nfs::VibeNFS;
 use vibefs::platform;
-use vibefs::VERSION;
+use vibefs::VERSION_FULL;
 
 /// Default idle timeout: 20 minutes
 const IDLE_TIMEOUT_SECS: u64 = 20 * 60;
@@ -153,7 +153,7 @@ async fn handle_client(
 
         let response = match request {
             DaemonRequest::Ping => DaemonResponse::Pong {
-                version: Some(VERSION.to_string()),
+                version: Some(VERSION_FULL.to_string()),
             },
 
             DaemonRequest::Status => {
@@ -163,7 +163,7 @@ async fn handle_client(
                     nfs_port: 0, // Using per-session ports now
                     session_count: state.sessions.len(),
                     uptime_secs: start_time.elapsed().as_secs(),
-                    version: Some(VERSION.to_string()),
+                    version: Some(VERSION_FULL.to_string()),
                 }
             }
 
