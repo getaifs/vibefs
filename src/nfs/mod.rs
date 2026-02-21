@@ -181,6 +181,15 @@ impl VibeNFS {
             ftype3::NF3REG
         };
 
+        // Volatile (untracked/gitignored) files: always stat the real file for size.
+        // These files change independently of git, so cached metadata.size is unreliable.
+        let size = if metadata.volatile && !metadata.is_dir {
+            let repo_file = self.repo_path.join(&metadata.path);
+            repo_file.metadata().map(|m| m.len()).unwrap_or(metadata.size)
+        } else {
+            metadata.size
+        };
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
@@ -191,8 +200,8 @@ impl VibeNFS {
             nlink: 1,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
-            size: metadata.size,
-            used: metadata.size,
+            size,
+            used: size,
             rdev: specdata3 {
                 specdata1: 0,
                 specdata2: 0,
@@ -458,12 +467,23 @@ impl NFSFileSystem for VibeNFS {
             tokio::fs::read(&session_path)
                 .await
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?
+        } else if metadata.volatile {
+            // Volatile (untracked/gitignored) files always passthrough to real filesystem.
+            // Never trust cached git_oid or size — the file changes independently of git.
+            let repo_file = self.repo_path.join(&metadata.path);
+            if repo_file.exists() && repo_file.is_file() {
+                tokio::fs::read(&repo_file)
+                    .await
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            } else {
+                Vec::new()
+            }
         } else if let Some(oid) = &metadata.git_oid {
             // Read from Git ODB
             let git = self.git.read().await;
             git.read_blob(oid).map_err(|_| nfsstat3::NFS3ERR_IO)?
         } else {
-            // Untracked file - try to read from actual repo filesystem (passthrough)
+            // Untracked file without volatile flag - try repo filesystem
             let repo_file = self.repo_path.join(&metadata.path);
             if repo_file.exists() && repo_file.is_file() {
                 tokio::fs::read(&repo_file)
@@ -1229,5 +1249,140 @@ mod tests {
         // but we can verify it's not treated as a directory
         assert_eq!(symlink_fattr.mode, 0o644);
         assert_eq!(symlink_fattr.size, 35);
+    }
+
+    #[test]
+    fn test_volatile_file_size_from_disk() {
+        use crate::db::InodeMetadata;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("metadata.db");
+        let session_dir = temp_dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::process::Command::new("git").args(["init"]).current_dir(&repo_dir).output().unwrap();
+
+        // Create a real file on disk with known content
+        let disk_content = "real content on disk, much longer than stale";
+        std::fs::write(repo_dir.join("Cargo.lock"), disk_content).unwrap();
+
+        let metadata = MetadataStore::open(&db_path).unwrap();
+        let git = crate::git::GitRepo::open(&repo_dir).unwrap();
+
+        let nfs = VibeNFS::new(
+            Arc::new(RwLock::new(metadata)),
+            Arc::new(RwLock::new(git)),
+            session_dir,
+            repo_dir.clone(),
+            "test".to_string(),
+        );
+
+        // Volatile file with stale size (10) — should report real disk size
+        let volatile_meta = InodeMetadata {
+            path: "Cargo.lock".to_string(),
+            git_oid: None,
+            is_dir: false,
+            size: 10, // stale
+            volatile: true,
+        };
+        let fattr = nfs.metadata_to_fattr(200, &volatile_meta);
+        assert_eq!(fattr.size, disk_content.len() as u64);
+
+        // Non-volatile file uses cached size
+        let tracked_meta = InodeMetadata {
+            path: "src/main.rs".to_string(),
+            git_oid: Some("abc123".to_string()),
+            is_dir: false,
+            size: 999,
+            volatile: false,
+        };
+        let fattr = nfs.metadata_to_fattr(201, &tracked_meta);
+        assert_eq!(fattr.size, 999); // uses cached size
+    }
+
+    #[tokio::test]
+    async fn test_volatile_file_read_passthrough() {
+        use crate::db::InodeMetadata;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("metadata.db");
+        let session_dir = temp_dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+
+        // Create a file with "old content", commit it to get a git_oid
+        std::fs::write(repo_dir.join("passthrough.txt"), "old content from git").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "passthrough.txt"])
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "add file"])
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+
+        // Get the blob OID for the old content
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD:passthrough.txt"])
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        let old_oid = String::from_utf8(output.stdout).unwrap().trim().to_string();
+
+        // Now update the file on disk (simulating it changed after init)
+        std::fs::write(repo_dir.join("passthrough.txt"), "new content on disk").unwrap();
+
+        let metadata = MetadataStore::open(&db_path).unwrap();
+        // Register the file as volatile with the OLD git_oid (stale metadata)
+        let inode_id = metadata.next_inode_id().unwrap();
+        let volatile_meta = InodeMetadata {
+            path: "passthrough.txt".to_string(),
+            git_oid: Some(old_oid.clone()), // stale OID from before the file changed
+            is_dir: false,
+            size: 20,
+            volatile: true, // marked volatile — should passthrough regardless of git_oid
+        };
+        metadata.put_inode(inode_id, &volatile_meta).unwrap();
+
+        let git = crate::git::GitRepo::open(&repo_dir).unwrap();
+
+        let nfs = VibeNFS::new(
+            Arc::new(RwLock::new(metadata)),
+            Arc::new(RwLock::new(git)),
+            session_dir,
+            repo_dir,
+            "test".to_string(),
+        );
+
+        // Read via NFS — should get disk content, NOT git blob
+        let (data, _eof) = nfs.read(inode_id, 0, 1024).await.unwrap();
+        let content = String::from_utf8(data).unwrap();
+        assert_eq!(content, "new content on disk",
+            "volatile file should passthrough to disk, not read stale git blob");
+
+        // Verify the git blob would have returned old content (the bug scenario)
+        let git = crate::git::GitRepo::open(nfs.repo_path.as_path()).unwrap();
+        let blob = git.read_blob(&old_oid).unwrap();
+        assert_eq!(String::from_utf8(blob).unwrap(), "old content from git",
+            "git blob should still contain old content");
     }
 }

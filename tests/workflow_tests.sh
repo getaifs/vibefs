@@ -1370,6 +1370,165 @@ test_workflow_bare_vibe() {
 }
 
 # ============================================
+# WORKFLOW 40: Artifact Symlinks Appear Exactly Once
+# ============================================
+test_workflow_artifact_no_duplicates() {
+    local repo="$TEST_DIR/repo40"
+    setup_test_repo "$repo"
+    cd "$repo"
+
+    $VIBE_BIN init || { echo "vibe init failed"; return 1; }
+
+    # Create multiple sessions (this is what caused duplicates before the fix)
+    $VIBE_BIN new art-dup-1 -c "true" || { echo "new 1 failed"; return 1; }
+    $VIBE_BIN new art-dup-2 -c "true" || { echo "new 2 failed"; return 1; }
+    $VIBE_BIN new art-dup-3 -c "true" || { echo "new 3 failed"; return 1; }
+
+    # Check the third session's mount for duplicate artifact entries
+    local mount_point
+    mount_point=$($VIBE_BIN ls art-dup-3 -p) || { echo "Failed to get mount point"; return 1; }
+    [ -d "$mount_point" ] || { echo "Mount not available: $mount_point"; return 1; }
+
+    # Count how many times 'target' appears in ls output
+    local target_count
+    target_count=$(ls -la "$mount_point" 2>/dev/null | grep -c "^l.*target" || echo "0")
+
+    if [ "$target_count" -gt 1 ]; then
+        echo "FAIL: 'target' symlink appears $target_count times (expected at most 1)"
+        ls -la "$mount_point"
+        return 1
+    fi
+
+    # Count node_modules
+    local nm_count
+    nm_count=$(ls -la "$mount_point" 2>/dev/null | grep -c "^l.*node_modules" || echo "0")
+
+    if [ "$nm_count" -gt 1 ]; then
+        echo "FAIL: 'node_modules' symlink appears $nm_count times (expected at most 1)"
+        ls -la "$mount_point"
+        return 1
+    fi
+
+    echo "Artifact no-duplicates workflow passed"
+    return 0
+}
+
+# ============================================
+# WORKFLOW 41: Artifact Symlinks Point to Correct Session
+# ============================================
+test_workflow_artifact_per_session() {
+    local repo="$TEST_DIR/repo41"
+    setup_test_repo "$repo"
+    cd "$repo"
+
+    $VIBE_BIN init || { echo "vibe init failed"; return 1; }
+
+    $VIBE_BIN new art-sess-a -c "true" || { echo "new a failed"; return 1; }
+    $VIBE_BIN new art-sess-b -c "true" || { echo "new b failed"; return 1; }
+
+    local mount_a mount_b
+    mount_a=$($VIBE_BIN ls art-sess-a -p) || { echo "Failed to get mount_a"; return 1; }
+    mount_b=$($VIBE_BIN ls art-sess-b -p) || { echo "Failed to get mount_b"; return 1; }
+
+    # Verify each session's target symlink points to its own artifacts dir
+    if [ -L "$mount_a/target" ]; then
+        local target_a
+        target_a=$(readlink "$mount_a/target")
+        if ! echo "$target_a" | grep -q "art-sess-a"; then
+            echo "FAIL: Session A's target points to wrong session: $target_a"
+            return 1
+        fi
+    fi
+
+    if [ -L "$mount_b/target" ]; then
+        local target_b
+        target_b=$(readlink "$mount_b/target")
+        if ! echo "$target_b" | grep -q "art-sess-b"; then
+            echo "FAIL: Session B's target points to wrong session: $target_b"
+            return 1
+        fi
+    fi
+
+    # Write a file to session A's artifact dir, verify it doesn't appear in B
+    mkdir -p "$mount_a/target/debug"
+    echo "build output" > "$mount_a/target/debug/test-binary"
+
+    if [ -f "$mount_b/target/debug/test-binary" ]; then
+        echo "FAIL: Session B sees session A's build artifact"
+        return 1
+    fi
+
+    echo "Artifact per-session workflow passed"
+    return 0
+}
+
+# ============================================
+# WORKFLOW 42: Artifact Files Not Committed
+# ============================================
+test_workflow_artifacts_not_committed() {
+    local repo="$TEST_DIR/repo42"
+    setup_test_repo "$repo"
+    cd "$repo"
+
+    $VIBE_BIN init || { echo "vibe init failed"; return 1; }
+    $VIBE_BIN new art-commit -c "true" || { echo "new failed"; return 1; }
+
+    local mount_point
+    mount_point=$($VIBE_BIN ls art-commit -p) || { echo "Failed to get mount point"; return 1; }
+
+    # Write a real file through NFS (should be committed)
+    echo 'real code' > "$mount_point/real_file.rs"
+    sleep 0.5
+
+    # Write into artifact dir (should NOT be committed)
+    mkdir -p "$mount_point/target/debug"
+    echo 'build garbage' > "$mount_point/target/debug/binary"
+    mkdir -p "$mount_point/node_modules/some-pkg"
+    echo '{}' > "$mount_point/node_modules/some-pkg/package.json"
+
+    # Commit the session
+    output=$($VIBE_BIN commit art-commit -m "Test artifact exclusion" 2>&1)
+    exit_code=$?
+
+    if [ $exit_code -ne 0 ]; then
+        echo "vibe commit failed"
+        echo "Output: $output"
+        return 1
+    fi
+
+    # Verify the ref was created
+    git show-ref --verify refs/vibes/art-commit 2>/dev/null || {
+        echo "ref not created"
+        return 1
+    }
+
+    # Check what was committed - should have real_file.rs but NOT target/ or node_modules/
+    local committed_files
+    committed_files=$(git show --stat refs/vibes/art-commit 2>/dev/null)
+
+    if echo "$committed_files" | grep -q "target/debug/binary"; then
+        echo "FAIL: Build artifact 'target/debug/binary' was committed"
+        echo "Committed: $committed_files"
+        return 1
+    fi
+
+    if echo "$committed_files" | grep -q "node_modules/"; then
+        echo "FAIL: node_modules files were committed"
+        echo "Committed: $committed_files"
+        return 1
+    fi
+
+    if ! echo "$committed_files" | grep -q "real_file.rs"; then
+        echo "FAIL: real_file.rs was NOT committed (expected it to be)"
+        echo "Committed: $committed_files"
+        return 1
+    fi
+
+    echo "Artifacts not committed workflow passed"
+    return 0
+}
+
+# ============================================
 # Run all tests
 # ============================================
 main() {
@@ -1430,6 +1589,9 @@ main() {
     run_test "37. Old Command Aliases" test_workflow_aliases
     run_test "38. Commands From Inside Mount" test_workflow_commands_from_mount
     run_test "39. Bare vibe Shows Status" test_workflow_bare_vibe
+    run_test "40. Artifact Symlinks No Duplicates" test_workflow_artifact_no_duplicates
+    run_test "41. Artifact Symlinks Per-Session Target" test_workflow_artifact_per_session
+    run_test "42. Artifacts Not Committed" test_workflow_artifacts_not_committed
 
     # Final cleanup
     cleanup

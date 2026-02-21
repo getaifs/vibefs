@@ -347,6 +347,12 @@ const ARTIFACT_DIRS: &[&str] = &[
 /// Set up symlinks for build artifact directories and register them in metadata.
 /// These directories are symlinked to local storage (/tmp/vibe-artifacts/<session>/)
 /// to avoid macOS NFS xattr issues and improve build performance.
+///
+/// Artifact dirs are OUTSIDE the CoW system:
+/// - NFS clients follow the symlink and read/write to local storage directly
+/// - Writes bypass the NFS server entirely, so no dirty tracking occurs
+/// - They are never committed by `vibe commit` (never dirty + gitignored)
+/// - Each session gets its own artifact storage for build isolation
 async fn setup_artifact_symlinks(
     session_dir: &Path,
     vibe_id: &str,
@@ -360,35 +366,49 @@ async fn setup_artifact_symlinks(
         let local_path = artifacts_base.join(dir_name);
         let symlink_path = session_dir.join(dir_name);
 
-        // Skip if symlink already exists
-        if symlink_path.exists() || symlink_path.is_symlink() {
-            continue;
+        // Ensure physical symlink exists in session directory
+        if !symlink_path.exists() && !symlink_path.is_symlink() {
+            std::fs::create_dir_all(&local_path)
+                .with_context(|| format!("Failed to create local artifact dir: {}", local_path.display()))?;
+
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&local_path, &symlink_path)
+                .with_context(|| format!("Failed to create symlink: {} -> {}", symlink_path.display(), local_path.display()))?;
         }
 
-        // Create the local directory
-        std::fs::create_dir_all(&local_path)
-            .with_context(|| format!("Failed to create local artifact dir: {}", local_path.display()))?;
-
-        // Create symlink in session directory
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&local_path, &symlink_path)
-            .with_context(|| format!("Failed to create symlink: {} -> {}", symlink_path.display(), local_path.display()))?;
-
-        // Register symlink in metadata so NFS exposes it (skip if already registered)
+        // Ensure metadata inode exists with correct target for THIS session.
+        // clone_to may have copied an inode pointing to a different session's artifacts.
         let store = metadata.write().await;
-        if store.get_inode_by_path(dir_name)?.is_some() {
-            continue;
-        }
-        let inode_id = store.next_inode_id()?;
         let target_str = local_path.to_string_lossy().to_string();
-        let meta = InodeMetadata {
-            path: dir_name.to_string(),
-            git_oid: Some(format!("symlink:{}", target_str)),
-            is_dir: false,
-            size: target_str.len() as u64,
-            volatile: true,
-        };
-        store.put_inode(inode_id, &meta)?;
+        let expected_oid = format!("symlink:{}", target_str);
+
+        if let Some(existing_id) = store.get_inode_by_path(dir_name)? {
+            // Inode exists - verify it points to this session's artifacts
+            if let Some(existing_meta) = store.get_inode(existing_id)? {
+                if existing_meta.git_oid.as_deref() != Some(&expected_oid) {
+                    // Wrong target (inherited from another session via clone_to) - fix it
+                    let meta = InodeMetadata {
+                        path: dir_name.to_string(),
+                        git_oid: Some(expected_oid),
+                        is_dir: false,
+                        size: target_str.len() as u64,
+                        volatile: true,
+                    };
+                    store.put_inode(existing_id, &meta)?;
+                }
+            }
+        } else {
+            // No inode for this path - create one
+            let inode_id = store.next_inode_id()?;
+            let meta = InodeMetadata {
+                path: dir_name.to_string(),
+                git_oid: Some(expected_oid),
+                is_dir: false,
+                size: target_str.len() as u64,
+                volatile: true,
+            };
+            store.put_inode(inode_id, &meta)?;
+        }
     }
 
     Ok(())

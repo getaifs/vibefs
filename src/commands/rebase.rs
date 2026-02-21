@@ -4,7 +4,18 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::commands::spawn::SpawnInfo;
+use crate::daemon_client::DaemonClient;
+use crate::daemon_ipc::DaemonResponse;
 use crate::git::GitRepo;
+use crate::platform;
+
+/// Check if our cwd is inside the given mount path
+fn is_cwd_inside_mount(mount_point: &str) -> bool {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| cwd.to_str().map(|s| s.starts_with(mount_point)))
+        .unwrap_or(false)
+}
 
 /// Rebase a session to the current HEAD
 ///
@@ -78,8 +89,65 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
     std::fs::write(&info_path, info_json)?;
 
     println!("\n✓ Session '{}' rebased to {}", session, &head_commit[..7]);
-    println!("\nNote: The NFS mount still serves the old Git tree until you restart the session.");
-    println!("Run 'vibe close {} && vibe spawn {}' to fully refresh.", session, session);
+
+    // Auto-restart the NFS mount so the session serves the updated Git tree
+    if DaemonClient::is_running(repo_path).await {
+        print!("  Restarting NFS mount...");
+
+        // Unexport the session (stops the old NFS server)
+        let mut client = DaemonClient::connect(repo_path).await?;
+        match client.unexport_session(session).await? {
+            DaemonResponse::SessionUnexported { .. } => {}
+            DaemonResponse::Error { message } => {
+                eprintln!("\n  Warning: unexport failed: {}", message);
+            }
+            _ => {}
+        }
+
+        // Unmount the stale NFS mount point
+        let old_mount = spawn_info.mount_point.to_string_lossy().to_string();
+        platform::unmount_nfs_sync(&old_mount).ok();
+
+        // Re-export the session (creates new NFS server, reuses existing metadata)
+        let mut client = DaemonClient::connect(repo_path).await?;
+        match client.export_session(session).await? {
+            DaemonResponse::SessionExported { nfs_port, mount_point, .. } => {
+                // Re-mount NFS at the new port
+                match platform::mount_nfs(&mount_point, nfs_port) {
+                    Ok(_) => {
+                        println!(" done");
+                        println!("  NFS mounted at: {}", mount_point);
+
+                        // Update SpawnInfo with new port
+                        spawn_info.port = nfs_port;
+                        let info_json = serde_json::to_string_pretty(&spawn_info)?;
+                        std::fs::write(&info_path, info_json)?;
+
+                        // Re-register mount
+                        if let Err(e) = platform::register_mount(&mount_point, repo_path) {
+                            eprintln!("  Warning: Failed to register mount: {}", e);
+                        }
+
+                        // If running from inside the mount, the shell's cwd is now stale
+                        if is_cwd_inside_mount(&mount_point) {
+                            println!("\n  Your shell's working directory was invalidated by the remount.");
+                            println!("  Run: cd {}", mount_point);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(" mount failed: {}", e);
+                        eprintln!("  NFS server running on port {}. Mount manually if needed.", nfs_port);
+                    }
+                }
+            }
+            DaemonResponse::Error { message } => {
+                eprintln!(" failed: {}", message);
+            }
+            _ => {}
+        }
+    } else {
+        println!("\n  Note: Daemon not running. Start a session with 'vibe new {}' to apply.", session);
+    }
 
     Ok(())
 }
@@ -96,6 +164,18 @@ fn list_session_files(session_dir: &Path) -> Result<Vec<String>> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
+
+            // Skip symlinks (artifact directories like target/, node_modules/)
+            if path.is_symlink() {
+                continue;
+            }
+
+            // Skip metadata.db (per-session RocksDB store)
+            if let Some(name) = path.file_name() {
+                if name == "metadata.db" {
+                    continue;
+                }
+            }
 
             if path.is_dir() {
                 walk_dir(&path, base, files)?;

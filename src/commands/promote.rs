@@ -229,10 +229,23 @@ fn scan_directory_recursive(base: &Path, current: &Path, files: &mut Vec<String>
         let entry = entry?;
         let path = entry.path();
 
+        // Skip symlinks (artifact directories like target/, node_modules/ are
+        // symlinked to local storage and are outside the CoW system)
+        if path.is_symlink() {
+            continue;
+        }
+
         // Skip hidden files and macOS metadata files
         if let Some(name) = path.file_name() {
             let name_str = name.to_string_lossy();
             if name_str.starts_with('.') || name_str.starts_with("._") || name_str == ".DS_Store" {
+                continue;
+            }
+        }
+
+        // Skip metadata.db (per-session RocksDB store lives inside session dir)
+        if let Some(name) = path.file_name() {
+            if name == "metadata.db" {
                 continue;
             }
         }

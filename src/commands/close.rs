@@ -194,6 +194,13 @@ fn collect_files_recursive(
             continue;
         }
 
+        // Skip metadata.db (per-session RocksDB store lives inside session dir)
+        if let Some(name) = path.file_name() {
+            if name == "metadata.db" {
+                continue;
+            }
+        }
+
         if path.is_dir() {
             collect_files_recursive(base, &path, files)?;
         } else {
