@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::commands::spawn::SpawnInfo;
 use crate::daemon_client::DaemonClient;
 use crate::daemon_ipc::DaemonResponse;
+use crate::db::MetadataStore;
 use crate::git::GitRepo;
 use crate::platform;
 
@@ -94,7 +95,7 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
     if DaemonClient::is_running(repo_path).await {
         print!("  Restarting NFS mount...");
 
-        // Unexport the session (stops the old NFS server)
+        // Unexport the session (stops the old NFS server, releases metadata.db lock)
         let mut client = DaemonClient::connect(repo_path).await?;
         match client.unexport_session(session).await? {
             DaemonResponse::SessionUnexported { .. } => {}
@@ -107,6 +108,14 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
         // Unmount the stale NFS mount point
         let old_mount = spawn_info.mount_point.to_string_lossy().to_string();
         platform::unmount_nfs_sync(&old_mount).ok();
+
+        // Reconcile stale session files: remove files that match the new HEAD
+        let session_metadata_db = session_dir.join("metadata.db");
+        match reconcile_session_files(&git, &session_dir, &head_commit, Some(&session_metadata_db)) {
+            Ok(0) => {}
+            Ok(n) => println!("\n  Cleaned up {} stale file(s) that match HEAD", n),
+            Err(e) => eprintln!("\n  Warning: reconciliation error: {}", e),
+        }
 
         // Re-export the session (creates new NFS server, reuses existing metadata)
         let mut client = DaemonClient::connect(repo_path).await?;
@@ -146,9 +155,102 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
             _ => {}
         }
     } else {
-        println!("\n  Note: Daemon not running. Start a session with 'vibe new {}' to apply.", session);
+        // Daemon not running — still reconcile stale files
+        let session_metadata_db = session_dir.join("metadata.db");
+        match reconcile_session_files(&git, &session_dir, &head_commit, Some(&session_metadata_db)) {
+            Ok(0) => {}
+            Ok(n) => println!("  Cleaned up {} stale file(s) that match HEAD", n),
+            Err(e) => eprintln!("  Warning: reconciliation error: {}", e),
+        }
+        println!("  Note: Daemon not running. Start a session with 'vibe new {}' to apply.", session);
     }
 
+    Ok(())
+}
+
+/// Reconcile session files after rebase: remove files that match the new HEAD.
+///
+/// When a session file is identical to its counterpart in the new HEAD commit,
+/// it's a stale copy (not an intentional edit). Removing it lets NFS reads
+/// fall through to the updated git tree.
+fn reconcile_session_files(
+    git: &GitRepo,
+    session_dir: &Path,
+    head_commit: &str,
+    metadata_db_path: Option<&Path>,
+) -> Result<usize> {
+    let session_files = list_session_files(session_dir)?;
+    if session_files.is_empty() {
+        return Ok(0);
+    }
+
+    let mut reconciled = 0;
+
+    // Try to open per-session metadata.db to clear dirty markers
+    let store = metadata_db_path.and_then(|p| {
+        if p.exists() {
+            MetadataStore::open(p).ok()
+        } else {
+            None
+        }
+    });
+
+    for file_path in &session_files {
+        let session_file = session_dir.join(file_path);
+        if !session_file.exists() || !session_file.is_file() {
+            continue;
+        }
+
+        // Read session file content
+        let session_content = match std::fs::read(&session_file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Read HEAD content for this path
+        match git.read_file_at_commit(head_commit, file_path) {
+            Ok(Some(head_content)) if head_content == session_content => {
+                // Content matches — this is a stale copy, remove it
+                if let Err(e) = std::fs::remove_file(&session_file) {
+                    eprintln!("  Warning: failed to remove stale file {}: {}", file_path, e);
+                    continue;
+                }
+
+                // Clean up empty parent directories
+                if let Some(parent) = session_file.parent() {
+                    let _ = remove_empty_parents(parent, session_dir);
+                }
+
+                // Clear dirty marker if we have DB access
+                if let Some(ref s) = store {
+                    let _ = s.clear_dirty_path(file_path);
+                }
+
+                reconciled += 1;
+            }
+            _ => {
+                // File differs from HEAD or doesn't exist in HEAD — keep it
+            }
+        }
+    }
+
+    Ok(reconciled)
+}
+
+/// Remove empty parent directories up to (but not including) the base directory
+fn remove_empty_parents(dir: &Path, base: &Path) -> Result<()> {
+    let mut current = dir;
+    while current != base {
+        if current.read_dir()?.next().is_none() {
+            std::fs::remove_dir(current)?;
+        } else {
+            break;
+        }
+        match current.parent() {
+            Some(p) => current = p,
+            None => break,
+        }
+    }
     Ok(())
 }
 
@@ -284,5 +386,80 @@ mod tests {
         let files = list_session_files(temp_dir.path()).unwrap();
         assert!(files.contains(&"file1.txt".to_string()));
         assert!(files.contains(&"subdir/file2.txt".to_string()));
+    }
+
+    #[test]
+    fn test_reconcile_removes_matching_files() {
+        use std::fs;
+
+        let temp_dir = setup_test_repo();
+        let repo_path = temp_dir.path();
+
+        // Create files and commit
+        fs::write(repo_path.join("unchanged.txt"), "same content").unwrap();
+        fs::write(repo_path.join("modified.txt"), "original").unwrap();
+        fs::create_dir_all(repo_path.join("src")).unwrap();
+        fs::write(repo_path.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo_path).output().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", "add files"]).current_dir(repo_path).output().unwrap();
+
+        let git = GitRepo::open(repo_path).unwrap();
+        let head = git.head_commit().unwrap();
+
+        // Simulate session dir with stale + modified files
+        let session_dir = temp_dir.path().join("session");
+        fs::create_dir_all(session_dir.join("src")).unwrap();
+
+        // This file matches HEAD → should be reconciled (removed)
+        fs::write(session_dir.join("unchanged.txt"), "same content").unwrap();
+        // This file matches HEAD → should be reconciled
+        fs::write(session_dir.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+        // This file differs from HEAD → should be kept
+        fs::write(session_dir.join("modified.txt"), "changed content").unwrap();
+        // This file doesn't exist in HEAD → should be kept
+        fs::write(session_dir.join("new_file.txt"), "brand new").unwrap();
+
+        let reconciled = reconcile_session_files(&git, &session_dir, &head, None).unwrap();
+
+        assert_eq!(reconciled, 2, "should reconcile 2 matching files");
+        assert!(!session_dir.join("unchanged.txt").exists(), "matching file should be removed");
+        assert!(!session_dir.join("src/lib.rs").exists(), "matching nested file should be removed");
+        assert!(!session_dir.join("src").exists(), "empty parent dir should be cleaned up");
+        assert!(session_dir.join("modified.txt").exists(), "modified file should be kept");
+        assert!(session_dir.join("new_file.txt").exists(), "new file should be kept");
+    }
+
+    #[test]
+    fn test_reconcile_clears_dirty_markers() {
+        use std::fs;
+        use crate::db::MetadataStore;
+
+        let temp_dir = setup_test_repo();
+        let repo_path = temp_dir.path();
+
+        fs::write(repo_path.join("file.txt"), "content").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo_path).output().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", "add"]).current_dir(repo_path).output().unwrap();
+
+        let git = GitRepo::open(repo_path).unwrap();
+        let head = git.head_commit().unwrap();
+
+        // Set up session with matching file and dirty marker
+        let session_dir = temp_dir.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("file.txt"), "content").unwrap();
+
+        let db_path = session_dir.join("metadata.db");
+        let store = MetadataStore::open(&db_path).unwrap();
+        store.mark_dirty("file.txt").unwrap();
+        assert!(store.is_dirty("file.txt").unwrap());
+        drop(store);
+
+        let reconciled = reconcile_session_files(&git, &session_dir, &head, Some(&db_path)).unwrap();
+        assert_eq!(reconciled, 1);
+
+        // Verify dirty marker was cleared
+        let store = MetadataStore::open(&db_path).unwrap();
+        assert!(!store.is_dirty("file.txt").unwrap(), "dirty marker should be cleared after reconciliation");
     }
 }

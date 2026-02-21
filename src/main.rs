@@ -78,6 +78,10 @@ enum Commands {
         /// Skip automatic backup of current state
         #[arg(long)]
         no_backup: bool,
+
+        /// Discard ALL session changes and reset to base commit
+        #[arg(long)]
+        hard: bool,
     },
 
     /// Rebase session to current HEAD (update base commit)
@@ -332,9 +336,11 @@ async fn main() -> Result<()> {
             });
             commands::snapshot::snapshot_with_name(&repo_path, &session, &snapshot_name).await?;
         }
-        Commands::Undo { message, session, no_backup } => {
+        Commands::Undo { message, session, no_backup, hard } => {
             let session = commands::require_session(&repo_path, session)?;
-            if let Some(snapshot_name) = message {
+            if hard {
+                commands::restore::reset_hard(&repo_path, &session, no_backup).await?;
+            } else if let Some(snapshot_name) = message {
                 commands::restore::restore(&repo_path, &session, &snapshot_name, no_backup).await?;
             } else {
                 // List available snapshots

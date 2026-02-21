@@ -31,6 +31,7 @@ struct Session {
     nfs_port: u16,
     created_at: Instant,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    nfs_task: Option<tokio::task::JoinHandle<()>>,
     #[allow(dead_code)]
     metadata: Arc<RwLock<MetadataStore>>,
 }
@@ -235,7 +236,7 @@ async fn handle_client(
                                                 let (sess_shutdown_tx, mut sess_shutdown_rx) = tokio::sync::broadcast::channel(1);
                                                 let vid = vibe_id.clone();
 
-                                                tokio::spawn(async move {
+                                                let nfs_handle = tokio::spawn(async move {
                                                     eprintln!("[vibed] NFS server running for {} on port {}", vid, port);
                                                     tokio::select! {
                                                         res = listener.handle_forever() => {
@@ -256,6 +257,7 @@ async fn handle_client(
                                                     nfs_port: port,
                                                     created_at: Instant::now(),
                                                     shutdown_tx: sess_shutdown_tx,
+                                                    nfs_task: Some(nfs_handle),
                                                     metadata: session_metadata,
                                                 };
 
@@ -283,10 +285,24 @@ async fn handle_client(
             }
 
             DaemonRequest::UnexportSession { vibe_id } => {
-                let mut state = state.lock().await;
-                if let Some(session) = state.sessions.remove(&vibe_id) {
-                    // Stop the NFS server for this session
+                let mut state_guard = state.lock().await;
+                if let Some(mut session) = state_guard.sessions.remove(&vibe_id) {
+                    // Stop the NFS server and wait for it to fully shut down
+                    // (releases the metadata.db lock so CLI can access it)
                     let _ = session.shutdown_tx.send(());
+                    if let Some(handle) = session.nfs_task.take() {
+                        drop(session); // Drop session to release our Arc ref
+                        drop(state_guard); // Release state lock while waiting
+                        // Wait briefly for graceful shutdown
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        if !handle.is_finished() {
+                            // NFS task stuck (client still connected?), force abort
+                            eprintln!("[vibed] Force-aborting NFS task for {}", vibe_id);
+                            handle.abort();
+                        }
+                        let _ = handle.await;
+                        eprintln!("[vibed] NFS task for {} stopped", vibe_id);
+                    }
                     DaemonResponse::SessionUnexported { vibe_id }
                 } else {
                     DaemonResponse::Error {

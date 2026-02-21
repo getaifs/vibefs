@@ -124,6 +124,23 @@ impl GitRepo {
         Ok(files)
     }
 
+    /// Read file content at a specific commit (like `git show <commit>:<path>`)
+    pub fn read_file_at_commit(&self, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let spec = format!("{}:{}", commit, path);
+        let output = Command::new("git")
+            .args(&["show", &spec])
+            .current_dir(&self.repo_path)
+            .output()
+            .context("Failed to run git show")?;
+
+        if !output.status.success() {
+            // File doesn't exist at this commit
+            return Ok(None);
+        }
+
+        Ok(Some(output.stdout))
+    }
+
     pub fn update_ref(&self, refname: &str, oid: &str) -> Result<()> {
         let output = Command::new("git")
             .args(&["update-ref", refname, oid])

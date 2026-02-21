@@ -220,6 +220,13 @@ impl MetadataStore {
         Ok(dest)
     }
 
+    /// Clear dirty mark for a specific path
+    pub fn clear_dirty_path(&self, path: &str) -> Result<()> {
+        let key = format!("dirty:{}", path);
+        self.db.delete(key.as_bytes())?;
+        Ok(())
+    }
+
     /// Clear all dirty marks
     pub fn clear_dirty(&self) -> Result<()> {
         let prefix = b"dirty:";

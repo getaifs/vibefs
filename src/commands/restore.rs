@@ -5,7 +5,10 @@ use chrono::Utc;
 use std::path::Path;
 
 use crate::cwd_validation;
+use crate::daemon_client::DaemonClient;
+use crate::daemon_ipc::DaemonResponse;
 use crate::db::MetadataStore;
+use crate::platform;
 
 /// Restore session state from a snapshot
 pub async fn restore<P: AsRef<Path>>(
@@ -147,30 +150,70 @@ pub async fn reset_hard<P: AsRef<Path>>(
         }
     }
 
-    // Remove all files in session dir except metadata.db and session metadata
+    // If daemon is running, unmount and unexport the session first
+    let daemon_running = DaemonClient::is_running(repo_path).await;
+    let mount_point = if daemon_running {
+        // Compute mount point path (same logic as daemon)
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".to_string());
+        let mp = platform::get_vibe_mounts_dir()
+            .join(format!("{}-{}", repo_name, session));
+
+        // Force unmount first so NFS client disconnects and the server task can exit
+        if mp.exists() {
+            platform::unmount_nfs_sync(&mp.to_string_lossy()).ok();
+        }
+
+        // Unexport from daemon (stops NFS server, releases metadata.db lock)
+        let mut client = DaemonClient::connect(repo_path).await?;
+        match client.unexport_session(session).await? {
+            DaemonResponse::SessionUnexported { .. } => {}
+            DaemonResponse::Error { message } => {
+                eprintln!("Warning: unexport failed: {}", message);
+            }
+            _ => {}
+        }
+
+        Some(mp)
+    } else {
+        None
+    };
+
+    // Remove all files in session dir (including metadata.db — it will be
+    // re-cloned from the base on next export, with clean dirty markers)
     println!("Discarding all changes in session '{}'...", session);
     for entry in std::fs::read_dir(&session_dir)? {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        // Keep metadata.db (per-session RocksDB)
-        if name == "metadata.db" {
-            continue;
-        }
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            std::fs::remove_dir_all(&path)?;
-        } else {
+        let ft = entry.file_type()?;
+        if ft.is_symlink() || ft.is_file() {
             std::fs::remove_file(&path)?;
+        } else if ft.is_dir() {
+            std::fs::remove_dir_all(&path)?;
         }
     }
 
-    // Clear dirty tracking in per-session metadata store
-    let session_db = session_dir.join("metadata.db");
-    let db_path = if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") };
-    if db_path.exists() {
-        let store = MetadataStore::open(&db_path)
-            .context("Failed to open metadata store. If daemon is running, stop it first with 'vibe daemon stop'")?;
-        store.clear_dirty()?;
+    // Re-export session if daemon was running
+    if let Some(mp) = mount_point {
+        let mut client = DaemonClient::connect(repo_path).await?;
+        match client.export_session(session).await? {
+            DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
+                if let Err(e) = platform::mount_nfs(&mount_point, nfs_port) {
+                    eprintln!("Warning: mount issue: {}", e);
+                }
+            }
+            DaemonResponse::Error { message } => {
+                eprintln!("Warning: re-export failed: {}. Re-export manually with: vibe export {}", message, session);
+            }
+            _ => {}
+        }
+
+        // Clean up stale mount point if it's different from the new one
+        if mp.exists() {
+            std::fs::remove_dir(&mp).ok();
+        }
     }
 
     println!("Session '{}' reset to base commit.", session);

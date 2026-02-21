@@ -464,24 +464,13 @@ impl NFSFileSystem for VibeNFS {
             return Err(nfsstat3::NFS3ERR_ISDIR);
         }
 
-        // Check if file is dirty (modified in session)
-        let store = self.metadata.read().await;
-        let is_dirty = store
-            .is_dirty(&metadata.path)
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        drop(store);
-
         // Session path for potential reads
         let session_path = self.get_session_path(Path::new(&metadata.path)).await;
 
-        let data = if is_dirty {
-            // Dirty files are always read from session
-            tokio::fs::read(&session_path)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?
-        } else if session_path.exists() {
-            // File exists in session (e.g., newly created files that aren't marked dirty)
-            // This handles AppleDouble files and other session-created files
+        let data = if session_path.exists() {
+            // Session file takes priority (handles dirty files and AppleDouble metadata).
+            // If a file is marked dirty but its session file was removed (e.g., after
+            // rebase reconciliation), we gracefully fall through to git/repo below.
             tokio::fs::read(&session_path)
                 .await
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?
