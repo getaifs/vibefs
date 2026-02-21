@@ -188,13 +188,23 @@ impl VibeNFS {
             ftype3::NF3REG
         };
 
-        // Volatile (untracked/gitignored) files: always stat the real file for size.
-        // These files change independently of git, so cached metadata.size is unreliable.
-        let size = if metadata.volatile && !metadata.is_dir {
-            let repo_file = self.repo_path.join(&metadata.path);
-            repo_file.metadata().map(|m| m.len()).unwrap_or(metadata.size)
-        } else {
+        // Determine file size from the most authoritative source:
+        // 1. Session file (if it exists) — handles dirty files, including those
+        //    modified outside the NFS write path (e.g., direct cp/sed to session dir)
+        // 2. Repo file (for volatile/untracked files that change independently of git)
+        // 3. Cached metadata.size from RocksDB (for clean git-tracked files)
+        let size = if metadata.is_dir {
             metadata.size
+        } else {
+            let session_file = self.session_dir.join(&metadata.path);
+            if let Ok(m) = std::fs::metadata(&session_file) {
+                m.len()
+            } else if metadata.volatile {
+                let repo_file = self.repo_path.join(&metadata.path);
+                std::fs::metadata(&repo_file).map(|m| m.len()).unwrap_or(metadata.size)
+            } else {
+                metadata.size
+            }
         };
 
         // Use stored mtime if available, otherwise fall back to server init time.
@@ -1328,6 +1338,79 @@ mod tests {
         };
         let fattr = nfs.metadata_to_fattr(201, &tracked_meta);
         assert_eq!(fattr.size, 999); // uses cached size
+    }
+
+    #[tokio::test]
+    async fn test_getattr_reflects_session_file_size() {
+        // Reproduces the file truncation bug:
+        // When a file in the session directory is modified outside the NFS write path
+        // (e.g., direct cp/sed to session dir), getattr() should return the actual
+        // file size, not the stale cached size from RocksDB.
+        use crate::db::InodeMetadata;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("metadata.db");
+        let session_dir = temp_dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::process::Command::new("git").args(["init"]).current_dir(&repo_dir).output().unwrap();
+        std::process::Command::new("git").args(["config", "user.name", "Test"]).current_dir(&repo_dir).output().unwrap();
+        std::process::Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&repo_dir).output().unwrap();
+
+        // Create and commit a small file
+        std::fs::write(repo_dir.join("test.txt"), "hello").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(&repo_dir).output().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo_dir).output().unwrap();
+
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD:test.txt"])
+            .current_dir(&repo_dir).output().unwrap();
+        let oid = String::from_utf8(output.stdout).unwrap().trim().to_string();
+
+        let metadata_store = MetadataStore::open(&db_path).unwrap();
+        let inode_id = metadata_store.next_inode_id().unwrap();
+        let meta = InodeMetadata {
+            path: "test.txt".to_string(),
+            git_oid: Some(oid),
+            is_dir: false,
+            size: 5, // "hello" = 5 bytes
+            volatile: false,
+            mtime: 0,
+        };
+        metadata_store.put_inode(inode_id, &meta).unwrap();
+        metadata_store.mark_dirty("test.txt").unwrap();
+
+        let git = GitRepo::open(&repo_dir).unwrap();
+        let nfs = VibeNFS::new(
+            Arc::new(RwLock::new(metadata_store)),
+            Arc::new(RwLock::new(git)),
+            session_dir.clone(),
+            repo_dir,
+            "test".to_string(),
+        );
+
+        // Step 1: Write a larger file DIRECTLY to session dir (bypassing NFS write path)
+        let new_content = "hello world, this is much longer content that was written outside NFS";
+        std::fs::write(session_dir.join("test.txt"), new_content).unwrap();
+
+        // Step 2: getattr should reflect the ACTUAL file size, not the stale 5 bytes
+        let attr = nfs.getattr(inode_id).await.unwrap();
+        assert_eq!(
+            attr.size,
+            new_content.len() as u64,
+            "getattr should return actual session file size ({}), not stale metadata size (5)",
+            new_content.len()
+        );
+
+        // Step 3: read should also return the full content
+        let (data, eof) = nfs.read(inode_id, 0, 4096).await.unwrap();
+        assert_eq!(
+            String::from_utf8(data).unwrap(),
+            new_content,
+            "read should return full file content from session"
+        );
+        assert!(eof, "should be EOF after reading entire file");
     }
 
     #[tokio::test]
