@@ -238,9 +238,21 @@ async fn main() -> Result<()> {
             }
 
             // Generate session name if not provided
+            // When -c is used, extract command basename for a friendlier name
+            // e.g. `vibe new -c claude` → "condescending-claude"
             let session = session.unwrap_or_else(|| {
                 let sessions_dir = repo_path.join(".vibe/sessions");
-                vibefs::names::generate_unique_name(&sessions_dir)
+                if let Some(ref cmd) = command {
+                    let cmd_name = cmd.split_whitespace()
+                        .next()
+                        .unwrap_or("shell")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("shell");
+                    vibefs::names::generate_unique_agent_name(cmd_name, &sessions_dir)
+                } else {
+                    vibefs::names::generate_unique_name(&sessions_dir)
+                }
             });
 
             // If agent is specified, delegate to launch
