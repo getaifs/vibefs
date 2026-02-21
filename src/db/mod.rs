@@ -11,6 +11,8 @@ pub struct InodeMetadata {
     pub is_dir: bool,
     pub size: u64,
     pub volatile: bool, // For untracked files like .env, node_modules
+    #[serde(default)]
+    pub mtime: u64, // Unix epoch seconds; 0 = use server init time as fallback
 }
 
 /// Bi-directional inode-to-Git mapping store
@@ -250,6 +252,7 @@ mod tests {
             is_dir: false,
             size: 1024,
             volatile: false,
+            mtime: 0,
         };
 
         let inode_id = store.next_inode_id().unwrap();
@@ -272,6 +275,7 @@ mod tests {
             is_dir: false,
             size: 512,
             volatile: false,
+            mtime: 0,
         };
 
         let inode_id = store.next_inode_id().unwrap();

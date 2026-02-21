@@ -393,6 +393,7 @@ async fn setup_artifact_symlinks(
                         is_dir: false,
                         size: target_str.len() as u64,
                         volatile: true,
+                        mtime: 0,
                     };
                     store.put_inode(existing_id, &meta)?;
                 }
@@ -406,6 +407,7 @@ async fn setup_artifact_symlinks(
                 is_dir: false,
                 size: target_str.len() as u64,
                 volatile: true,
+                mtime: 0,
             };
             store.put_inode(inode_id, &meta)?;
         }

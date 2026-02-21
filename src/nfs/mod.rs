@@ -33,6 +33,8 @@ pub struct VibeNFS {
     vibe_id: String,
     /// Cache of parent -> children mappings for directory enumeration
     dir_children: Arc<RwLock<HashMap<fileid3, Vec<fileid3>>>>,
+    /// Stable timestamp (epoch secs) set at server start, used as fallback for inodes with mtime=0
+    init_time: u64,
 }
 
 impl VibeNFS {
@@ -43,6 +45,10 @@ impl VibeNFS {
         repo_path: PathBuf,
         vibe_id: String,
     ) -> Self {
+        let init_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         Self {
             metadata,
             git,
@@ -50,6 +56,7 @@ impl VibeNFS {
             repo_path,
             vibe_id,
             dir_children: Arc::new(RwLock::new(HashMap::new())),
+            init_time,
         }
     }
     // ... (omitting build_directory_cache and helpers for brevity if not changing)
@@ -190,9 +197,10 @@ impl VibeNFS {
             metadata.size
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
+        // Use stored mtime if available, otherwise fall back to server init time.
+        // This ensures timestamps are stable across GETATTR calls, which prevents
+        // tools from thinking files changed between read and write operations.
+        let ts = if metadata.mtime > 0 { metadata.mtime } else { self.init_time };
 
         fattr3 {
             ftype,
@@ -209,15 +217,15 @@ impl VibeNFS {
             fsid: 1,
             fileid: inode,
             atime: nfstime3 {
-                seconds: now.as_secs() as u32,
+                seconds: ts as u32,
                 nseconds: 0,
             },
             mtime: nfstime3 {
-                seconds: now.as_secs() as u32,
+                seconds: ts as u32,
                 nseconds: 0,
             },
             ctime: nfstime3 {
-                seconds: now.as_secs() as u32,
+                seconds: ts as u32,
                 nseconds: 0,
             },
         }
@@ -225,10 +233,6 @@ impl VibeNFS {
 
     /// Create the root directory fattr
     fn root_fattr(&self, fileid: fileid3) -> fattr3 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-
         fattr3 {
             ftype: ftype3::NF3DIR,
             mode: 0o755,
@@ -244,15 +248,15 @@ impl VibeNFS {
             fsid: 1,
             fileid,
             atime: nfstime3 {
-                seconds: now.as_secs() as u32,
+                seconds: self.init_time as u32,
                 nseconds: 0,
             },
             mtime: nfstime3 {
-                seconds: now.as_secs() as u32,
+                seconds: self.init_time as u32,
                 nseconds: 0,
             },
             ctime: nfstime3 {
-                seconds: now.as_secs() as u32,
+                seconds: self.init_time as u32,
                 nseconds: 0,
             },
         }
@@ -414,9 +418,13 @@ impl NFSFileSystem for VibeNFS {
                 drop(store);
             }
 
-            // Update size in metadata
+            // Update size and mtime in metadata
             let mut updated_metadata = metadata.clone();
             updated_metadata.size = new_size;
+            updated_metadata.mtime = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
 
             let store = self.metadata.write().await;
             store
@@ -560,9 +568,13 @@ impl NFSFileSystem for VibeNFS {
             drop(store);
         }
 
-        // Update size in metadata
+        // Update size and mtime in metadata
         let mut updated_metadata = metadata.clone();
         updated_metadata.size = new_size;
+        updated_metadata.mtime = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         let store = self.metadata.write().await;
         store
@@ -603,6 +615,10 @@ impl NFSFileSystem for VibeNFS {
             is_dir: false,
             size: 0,
             volatile: false,
+            mtime: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         };
 
         store
@@ -673,6 +689,10 @@ impl NFSFileSystem for VibeNFS {
             is_dir: true,
             size: 0,
             volatile: false,
+            mtime: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         };
 
         store
@@ -996,6 +1016,10 @@ impl NFSFileSystem for VibeNFS {
             is_dir: false,
             size: target.len() as u64,
             volatile: true,
+            mtime: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         };
 
         store
@@ -1219,6 +1243,7 @@ mod tests {
             is_dir: false,
             size: 100,
             volatile: false,
+            mtime: 0,
         };
         let regular_fattr = nfs.metadata_to_fattr(100, &regular_meta);
         // ftype3::NF3REG has mode 0o644 in our impl
@@ -1231,6 +1256,7 @@ mod tests {
             is_dir: true,
             size: 0,
             volatile: false,
+            mtime: 0,
         };
         let dir_fattr = nfs.metadata_to_fattr(101, &dir_meta);
         assert_eq!(dir_fattr.mode, 0o755);
@@ -1242,6 +1268,7 @@ mod tests {
             is_dir: false,
             size: 35,
             volatile: true,
+            mtime: 0,
         };
         let symlink_fattr = nfs.metadata_to_fattr(102, &symlink_meta);
         // Symlinks should also have mode 0o644 but ftype should be NF3LNK
@@ -1285,6 +1312,7 @@ mod tests {
             is_dir: false,
             size: 10, // stale
             volatile: true,
+            mtime: 0,
         };
         let fattr = nfs.metadata_to_fattr(200, &volatile_meta);
         assert_eq!(fattr.size, disk_content.len() as u64);
@@ -1296,6 +1324,7 @@ mod tests {
             is_dir: false,
             size: 999,
             volatile: false,
+            mtime: 0,
         };
         let fattr = nfs.metadata_to_fattr(201, &tracked_meta);
         assert_eq!(fattr.size, 999); // uses cached size
@@ -1360,6 +1389,7 @@ mod tests {
             is_dir: false,
             size: 20,
             volatile: true, // marked volatile — should passthrough regardless of git_oid
+            mtime: 0,
         };
         metadata.put_inode(inode_id, &volatile_meta).unwrap();
 

@@ -135,6 +135,7 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
         is_dir: true,
         size: 0,
         volatile: false,
+        mtime: 0,
     };
     metadata.put_inode(1, &root_metadata)?;
 
@@ -152,6 +153,7 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
             is_dir: true,
             size: 0,
             volatile: false,
+            mtime: 0,
         };
 
         metadata.put_inode(inode_id, &dir_metadata)?;
@@ -174,6 +176,7 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
             is_dir: false,
             size,
             volatile: false,
+            mtime: 0,
         };
 
         metadata.put_inode(inode_id, &inode_metadata)?;
@@ -209,6 +212,7 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
                 is_dir: true,
                 size: 0,
                 volatile: true,  // Mark as volatile since untracked
+                mtime: 0,
             };
             metadata.put_inode(inode_id, &dir_metadata)?;
         }
@@ -221,6 +225,7 @@ pub async fn init<P: AsRef<Path>>(repo_path: P) -> Result<()> {
                 is_dir: false,
                 size,
                 volatile: true,  // Mark as volatile since untracked
+                mtime: 0,
             };
             metadata.put_inode(inode_id, &inode_metadata)?;
         }
