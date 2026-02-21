@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use crate::commands::spawn::SpawnInfo;
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
+use crate::gitignore::PromoteFilter;
 
 /// Show unified diff of session changes against base commit
 pub async fn diff<P: AsRef<Path>>(
@@ -51,7 +52,15 @@ pub async fn diff<P: AsRef<Path>>(
     };
     let store = MetadataStore::open_readonly(&db_path)
         .context("Failed to open metadata store. Is another vibe command running?")?;
-    let dirty_paths = store.get_dirty_paths()?;
+    let all_dirty_paths = store.get_dirty_paths()?;
+
+    // Filter out gitignored files
+    let session_dir_path = vibe_dir.join("sessions").join(session);
+    let dirty_paths = if let Ok(filter) = PromoteFilter::new(repo_path, Some(&session_dir_path)) {
+        filter.filter_promotable(&all_dirty_paths).into_iter().cloned().collect::<Vec<_>>()
+    } else {
+        all_dirty_paths
+    };
 
     if dirty_paths.is_empty() {
         println!("No changes in session '{}'", session);

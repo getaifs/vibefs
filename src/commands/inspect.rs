@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::commands::spawn::SpawnInfo;
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
+use crate::gitignore::PromoteFilter;
 
 /// Get HEAD commit for comparison
 fn get_head_commit(repo_path: &Path) -> Option<String> {
@@ -28,14 +29,22 @@ pub async fn inspect<P: AsRef<Path>>(
     let spawn_info = SpawnInfo::load(repo_path, session)
         .with_context(|| format!("Session '{}' not found. Run 'vibe status' to see active sessions.", session))?;
 
-    // Get dirty files from per-session store (fallback to base)
+    // Get dirty files from per-session store (fallback to base), filtered by .gitignore
     let db_path = {
         let session_db = vibe_dir.join("sessions").join(session).join("metadata.db");
         if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") }
     };
     let dirty_files = if db_path.exists() {
         match MetadataStore::open_readonly(&db_path) {
-            Ok(store) => store.get_dirty_paths()?,
+            Ok(store) => {
+                let paths = store.get_dirty_paths()?;
+                let session_dir = vibe_dir.join("sessions").join(session);
+                if let Ok(filter) = PromoteFilter::new(repo_path, Some(&session_dir)) {
+                    filter.filter_promotable(&paths).into_iter().cloned().collect()
+                } else {
+                    paths
+                }
+            }
             Err(_) => {
                 // Fallback: if read-only fails, return empty list
                 Vec::new()

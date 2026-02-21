@@ -10,6 +10,7 @@ use crate::daemon_client::DaemonClient;
 use crate::daemon_ipc::{self, DaemonResponse};
 use crate::db::MetadataStore;
 use crate::git::GitRepo;
+use crate::gitignore::PromoteFilter;
 
 /// Show status - overview, per-session details, or conflicts
 pub async fn status<P: AsRef<Path>>(
@@ -81,12 +82,21 @@ async fn show_overview<P: AsRef<Path>>(repo_path: P, json_output: bool) -> Resul
             // Get active sessions
             if let Ok(DaemonResponse::Sessions { sessions }) = client.list_sessions().await {
                 for sess in sessions {
-                    // Get dirty count from per-session metadata store
+                    // Get dirty count from per-session metadata store (filtered by .gitignore)
                     let dirty_count = {
                         let session_db = vibe_dir.join("sessions").join(&sess.vibe_id).join("metadata.db");
+                        let session_dir = vibe_dir.join("sessions").join(&sess.vibe_id);
                         let db_path = if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") };
                         if let Ok(store) = MetadataStore::open_readonly(&db_path) {
-                            store.get_dirty_paths().map(|p| p.len()).unwrap_or(0)
+                            if let Ok(paths) = store.get_dirty_paths() {
+                                if let Ok(filter) = PromoteFilter::new(repo_path, Some(&session_dir)) {
+                                    filter.filter_promotable(&paths).len()
+                                } else {
+                                    paths.len()
+                                }
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         }
@@ -164,14 +174,22 @@ async fn show_session_details<P: AsRef<Path>>(
         _ => None,
     };
 
-    // Get dirty files from per-session store (fallback to base)
+    // Get dirty files from per-session store (fallback to base), filtered by .gitignore
     let db_path = {
         let session_db = vibe_dir.join("sessions").join(session_id).join("metadata.db");
         if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") }
     };
     let dirty_files = if db_path.exists() {
         match MetadataStore::open_readonly(&db_path) {
-            Ok(store) => store.get_dirty_paths()?,
+            Ok(store) => {
+                let paths = store.get_dirty_paths()?;
+                let session_dir = vibe_dir.join("sessions").join(session_id);
+                if let Ok(filter) = PromoteFilter::new(repo_path, Some(&session_dir)) {
+                    filter.filter_promotable(&paths).into_iter().cloned().collect()
+                } else {
+                    paths
+                }
+            }
             Err(_) => Vec::new(),
         }
     } else {
@@ -239,15 +257,21 @@ async fn show_conflicts_status<P: AsRef<Path>>(repo_path: P, json_output: bool) 
         Vec::new()
     };
 
-    // Collect dirty paths per session from per-session metadata stores
+    // Collect dirty paths per session from per-session metadata stores (filtered by .gitignore)
     let mut file_sessions: HashMap<String, Vec<String>> = HashMap::new();
 
     for session in &sessions {
         let session_db = sessions_dir.join(session).join("metadata.db");
+        let session_dir = sessions_dir.join(session);
         let db_path = if session_db.exists() { session_db } else { vibe_dir.join("metadata.db") };
         if let Ok(store) = MetadataStore::open_readonly(&db_path) {
             if let Ok(dirty_paths) = store.get_dirty_paths() {
-                for path in dirty_paths {
+                let filtered = if let Ok(filter) = PromoteFilter::new(repo_path, Some(&session_dir)) {
+                    filter.filter_promotable(&dirty_paths).into_iter().cloned().collect::<Vec<_>>()
+                } else {
+                    dirty_paths
+                };
+                for path in filtered {
                     file_sessions
                         .entry(path)
                         .or_default()
