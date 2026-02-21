@@ -22,6 +22,32 @@ fn version_string() -> &'static str {
 #[command(name = "vibe")]
 #[command(version = version_string())]
 #[command(about = "A virtual filesystem for massively parallel AI agent workflows", long_about = None)]
+#[command(help_template = "\
+{about}
+
+Usage: {name} [OPTIONS] [COMMAND]
+
+Sessions:
+  new       Create a new session and enter shell
+  attach    Attach to an existing session
+  kill      Kill a session (unmount and clean up)
+
+Versioning:
+  save      Create a checkpoint of session state
+  undo      Restore session from a checkpoint
+  commit    Commit session changes to a Git branch
+  diff      Show unified diff of session changes
+
+Info:
+  ls        List sessions and show status
+
+System:
+  init      Initialize VibeFS for a Git repository
+  rebase    Rebase session to current HEAD
+  daemon    Daemon management commands
+
+{all-args}\
+")]
 struct Cli {
     /// Path to the Git repository (defaults to current directory)
     #[arg(short, long, default_value = ".")]
@@ -34,9 +60,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize VibeFS for a Git repository
+    #[command(hide = true)]
     Init,
 
     /// Create a new session and enter shell
+    #[command(hide = true)]
     New {
         /// Session name (auto-generated if not provided)
         session: Option<String>,
@@ -55,6 +83,7 @@ enum Commands {
     },
 
     /// Create a checkpoint of session state
+    #[command(hide = true)]
     Save {
         /// Snapshot name (auto-generated timestamp if not provided)
         name: Option<String>,
@@ -65,6 +94,7 @@ enum Commands {
     },
 
     /// Restore session from a checkpoint
+    #[command(hide = true)]
     Undo {
         /// Snapshot name to restore (lists available if not provided)
         name: Option<String>,
@@ -79,6 +109,7 @@ enum Commands {
     },
 
     /// Rebase session to current HEAD (update base commit)
+    #[command(hide = true)]
     Rebase {
         /// Session to rebase (auto-detected if in mount or single session)
         session: Option<String>,
@@ -89,7 +120,7 @@ enum Commands {
     },
 
     /// Commit session changes to a Git ref
-    #[command(alias = "promote")]
+    #[command(alias = "promote", hide = true)]
     Commit {
         /// Session to commit (auto-detected if in mount or single session)
         session: Option<String>,
@@ -108,7 +139,7 @@ enum Commands {
     },
 
     /// Kill a session (unmount and clean up)
-    #[command(alias = "close")]
+    #[command(alias = "close", hide = true)]
     Kill {
         /// Session to kill (auto-detected if in mount or single session)
         session: Option<String>,
@@ -127,6 +158,7 @@ enum Commands {
     },
 
     /// Attach to an existing session (enter shell at mount point)
+    #[command(hide = true)]
     Attach {
         /// Session to attach to (auto-detected if possible)
         session: Option<String>,
@@ -137,12 +169,14 @@ enum Commands {
     },
 
     /// Daemon management commands
+    #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
     },
 
     /// Show unified diff of session changes
+    #[command(hide = true)]
     Diff {
         /// Session ID to show diff for (auto-detected if in mount or single session)
         session: Option<String>,
@@ -161,7 +195,7 @@ enum Commands {
     },
 
     /// List sessions and show status
-    #[command(name = "ls", alias = "status")]
+    #[command(name = "ls", alias = "status", hide = true)]
     Ls {
         /// Show details for a specific session (auto-detected if in mount or single session)
         session: Option<String>,
@@ -183,9 +217,6 @@ enum Commands {
         json: bool,
     },
 
-    /// Agent shortcut (e.g., 'vibe claude' -> 'vibe new --agent claude')
-    #[command(external_subcommand)]
-    Agent(Vec<String>),
 }
 
 #[derive(Subcommand)]
@@ -435,33 +466,6 @@ async fn main() -> Result<()> {
                 commands::inspect::inspect(&repo_path, &session, json).await?;
             } else {
                 commands::status::status(&repo_path, session.as_deref(), conflicts, json).await?;
-            }
-        }
-        Commands::Agent(args) => {
-            // Check if first arg is a known agent
-            if let Some(agent) = args.first() {
-                if commands::launch::is_known_agent(agent) {
-                    // Auto-init if .vibe/ doesn't exist
-                    let vibe_dir = repo_path.join(".vibe");
-                    if !vibe_dir.exists() {
-                        commands::init::init(&repo_path).await?;
-                    }
-                    // Pass remaining args to the agent
-                    let agent_args: Vec<String> = args.iter().skip(1).cloned().collect();
-                    commands::launch::launch(&repo_path, agent, None, &agent_args).await?;
-                } else {
-                    // Unknown command - show helpful error
-                    let known = commands::launch::KNOWN_AGENTS.join(", ");
-                    anyhow::bail!(
-                        "Unknown command '{}'\n\n\
-                         Known agent shortcuts: {}\n\n\
-                         Run 'vibe --help' to see available commands.",
-                        agent,
-                        known
-                    );
-                }
-            } else {
-                anyhow::bail!("No command provided. Run 'vibe --help' for usage.");
             }
         }
     }

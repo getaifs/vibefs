@@ -1235,19 +1235,13 @@ test_workflow_launch_noagent() {
 
     $VIBE_BIN init || { echo "init failed"; return 1; }
 
-    # Try to use unknown command (should fail with helpful message)
+    # Try to use unknown command (should fail - clap rejects unrecognized subcommands)
     output=$($VIBE_BIN nonexistent-command-xyz 2>&1)
     exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
         echo "Unknown command should have failed"
         return 1
-    fi
-
-    # Should mention it's an unknown command
-    if ! echo "$output" | grep -qi "unknown\|not found\|error"; then
-        echo "Error message not helpful"
-        echo "Output: $output"
     fi
 
     echo "Unknown command workflow passed"
