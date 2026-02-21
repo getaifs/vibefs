@@ -512,7 +512,7 @@ test_workflow_restore() {
     echo 'original' > "$session_dir/file.txt"
 
     # Save with a named checkpoint
-    $VIBE_BIN save checkpoint1 -s restore-test || { echo "save failed"; return 1; }
+    $VIBE_BIN save -m checkpoint1 -s restore-test || { echo "save failed"; return 1; }
 
     # Modify after save
     echo 'modified' > "$session_dir/file.txt"
@@ -522,7 +522,7 @@ test_workflow_restore() {
     sleep 1
 
     # Test: vibe undo
-    output=$($VIBE_BIN undo checkpoint1 -s restore-test 2>&1)
+    output=$($VIBE_BIN undo -m checkpoint1 -s restore-test 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
@@ -560,7 +560,7 @@ test_workflow_commit() {
     sleep 0.5
 
     # Test: vibe commit (was: vibe promote)
-    output=$($VIBE_BIN commit commit-test 2>&1)
+    output=$($VIBE_BIN commit -s commit-test 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
@@ -598,7 +598,7 @@ test_workflow_commit_message() {
     sleep 0.5
 
     # Test: vibe commit with message
-    output=$($VIBE_BIN commit message-test -m "Custom commit message" 2>&1)
+    output=$($VIBE_BIN commit -s message-test -m "Custom commit message" 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
@@ -665,7 +665,7 @@ test_workflow_commit_only() {
     sleep 0.5
 
     # Test: vibe commit --only "*.rs"
-    output=$($VIBE_BIN commit only-test --only "*.rs" 2>&1)
+    output=$($VIBE_BIN commit -s only-test --only "*.rs" 2>&1)
 
     echo "Commit only workflow passed"
     return 0
@@ -1100,7 +1100,7 @@ test_workflow_e2e() {
     echo "$output" | grep -q "e2e.rs" || { echo "diff doesn't show e2e.rs"; return 1; }
 
     # 6. Commit (was: promote)
-    output=$($VIBE_BIN commit e2e-test -m "E2E test commit" 2>&1)
+    output=$($VIBE_BIN commit -s e2e-test -m "E2E test commit" 2>&1)
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo "vibe commit failed"
@@ -1207,7 +1207,7 @@ test_workflow_commit_empty() {
     sleep 1
 
     # Commit without any changes
-    output=$($VIBE_BIN commit empty-commit 2>&1)
+    output=$($VIBE_BIN commit -s empty-commit 2>&1)
     exit_code=$?
 
     # Should succeed (no-op) or explicitly say no dirty files
@@ -1235,13 +1235,19 @@ test_workflow_launch_noagent() {
 
     $VIBE_BIN init || { echo "init failed"; return 1; }
 
-    # Try to use unknown command (should fail - clap rejects unrecognized subcommands)
+    # Try to use unknown command (should fail with helpful message)
     output=$($VIBE_BIN nonexistent-command-xyz 2>&1)
     exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
         echo "Unknown command should have failed"
         return 1
+    fi
+
+    # Should mention it's an unknown command
+    if ! echo "$output" | grep -qi "unknown\|not found\|error"; then
+        echo "Error message not helpful"
+        echo "Output: $output"
     fi
 
     echo "Unknown command workflow passed"
@@ -1315,7 +1321,7 @@ test_workflow_commands_from_mount() {
     $VIBE_BIN diff || { echo "vibe diff from mount failed"; return 1; }
 
     # Test: vibe save (no args) - should auto-detect session and create snapshot
-    $VIBE_BIN save "test-checkpoint" || { echo "vibe save from mount failed"; return 1; }
+    $VIBE_BIN save -m "test-checkpoint" || { echo "vibe save from mount failed"; return 1; }
 
     # Test: vibe undo (restore) - list snapshots should work
     $VIBE_BIN undo 2>&1 | grep -q "test-checkpoint" || { echo "vibe undo list from mount failed"; return 1; }
@@ -1481,7 +1487,7 @@ test_workflow_artifacts_not_committed() {
     echo '{}' > "$mount_point/node_modules/some-pkg/package.json"
 
     # Commit the session
-    output=$($VIBE_BIN commit art-commit -m "Test artifact exclusion" 2>&1)
+    output=$($VIBE_BIN commit -s art-commit -m "Test artifact exclusion" 2>&1)
     exit_code=$?
 
     if [ $exit_code -ne 0 ]; then
