@@ -10,55 +10,40 @@ use crate::cwd_validation;
 const VIBEFS_WORKFLOW_DOCS: &str = r#"
 ## VibeFS Workflow
 
-This repository uses VibeFS for managing parallel AI agent workflows on Git.
+This repository uses VibeFS for parallel AI agent workspaces on Git.
 
-### Quick Start (for AI agents)
-
-```bash
-# Create workspace and enter shell
-vibe new my-session
-
-# Edit files normally (changes are auto-tracked)
-echo "hello" > file.txt
-
-# Checkpoint progress (optional)
-vibe save
-
-# Commit changes to Git ref
-vibe promote
-
-# Exit shell when done
-```
-
-### Working Inside the Mount
-
-When you're inside a VibeFS mount (your session workspace):
-
-- **All `vibe` commands auto-detect your session** - no need to specify session name
-- **Git commands won't work** - the mount doesn't include `.git`
-- Use `vibe diff` instead of `git diff`
-- Use `vibe promote` to commit changes (creates refs/vibes/<session>)
-- Use `vibe save` / `vibe undo` for checkpoints
+You are working inside a VibeFS mount — an isolated virtual filesystem backed
+by Git. Your changes are tracked automatically.
 
 ### Key Commands
 
-| From inside mount | From repo root |
-|-------------------|----------------|
-| `vibe status` | `vibe status <session>` |
-| `vibe diff` | `vibe diff <session>` |
-| `vibe save` | `vibe save -s <session>` |
-| `vibe undo` | `vibe undo -s <session>` |
-| `vibe promote` | `vibe promote <session>` |
+All commands auto-detect your session when run from inside the mount:
+
+```bash
+vibe diff              # show what you changed
+vibe save              # checkpoint current state
+vibe undo --hard       # discard all changes, reset to base
+vibe commit            # commit changes to Git ref
+vibe ls                # show session status
+```
+
+From the repo root, specify the session: `vibe diff <session>`, `vibe commit <session>`, etc.
+
+### Important
+
+- **Do NOT use git commands** — this mount has no `.git` directory
+- Use `vibe diff` instead of `git diff`
+- Use `vibe commit` instead of `git commit`
+- Changes are committed to `refs/vibes/<session>` and merged with `git merge` from the repo root
 
 ### Full Workflow
 
-1. **Initialize** (first time): `vibe init`
-2. **Create session**: `vibe new <name>` (spawns + enters shell)
-3. **Work**: Edit files, run builds, tests
-4. **Checkpoint**: `vibe save` (optional backup)
-5. **Commit**: `vibe promote` (creates Git ref)
-6. **Merge**: `git merge refs/vibes/<name>` (from repo root)
-7. **Cleanup**: `vibe close` or exit shell
+1. `vibe new <name>` — create session, enter shell
+2. Edit files, run builds, tests
+3. `vibe save` — checkpoint (optional)
+4. `vibe commit` — commit to Git ref
+5. `exit` — leave session
+6. `git merge refs/vibes/<name>` — merge from repo root
 "#;
 
 /// Initialize VibeFS for a Git repository
@@ -424,7 +409,7 @@ mod tests {
         let content = fs::read_to_string(repo_path.join("AGENTS.md")).unwrap();
         assert!(content.contains("## VibeFS Workflow"));
         assert!(content.contains("vibe new"));
-        assert!(content.contains("vibe promote"));
+        assert!(content.contains("vibe commit"));
     }
 
     #[tokio::test]

@@ -1,231 +1,115 @@
 # VibeFS
 
-**A "Clean Slate" Virtual Filesystem for Massively Parallel AI Agent Workflows**
+Isolated Git workspaces for parallel AI agents. Each agent gets a virtual filesystem backed by Git's object database — reads come from Git, writes go to a session directory. No copies, no conflicts.
 
-VibeFS is a Rust-based userspace NFS server that decouples Git worktrees from storage, enabling 100+ AI agents to work in isolated, zero-copy sandboxes while maintaining a single source of truth in Git.
-
-## Overview
-
-VibeFS enables massively parallel AI agent workflows by providing each agent with its own ephemeral workspace that appears as a full Git repository, but is actually a lightweight virtual filesystem backed by:
-
-- **Git Object Database** for immutable, versioned content
-- **RocksDB** for fast inode-to-OID mappings
-- **Session directories** for Copy-on-Write overlays
-
-This architecture allows agents to work independently without conflicts, while changes can be promoted and merged back into the main repository.
-
-## System Requirements
-
-### Runtime Requirements
-
-- **Git**: 2.30+
-- **macOS**: Built-in NFS client (default)
-- **Linux**: NFS client tools (`nfs-utils` on Fedora/RHEL, `nfs-common` on Debian/Ubuntu)
-
-### Optional Dependencies for CoW Snapshots
-
-- **macOS**: APFS filesystem (default on modern macOS)
-- **Linux**: Btrfs or XFS filesystem with reflink support
-
-### Build Requirements (Source Builds Only)
-
-- **Rust**: 1.70+ (install via [rustup](https://rustup.rs/))
-- **C++ Compiler**: Required for RocksDB compilation
-  - Linux: `sudo dnf install gcc-c++` (Fedora) or `sudo apt install build-essential` (Ubuntu)
-  - macOS: Xcode Command Line Tools (`xcode-select --install`)
-- **libclang**: Required for bindgen
-  - Linux: `sudo dnf install clang-devel` (Fedora) or `sudo apt install libclang-dev` (Ubuntu)
-  - macOS: Included with Xcode Command Line Tools
-
-## Installation
-
-### Quick Install (Prebuilt Releases)
+## Install
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/getaifs/vibefs/HEAD/install.sh | bash
 ```
 
-This installs `vibe`, `vibed`, and `mark_dirty` to `~/.local/bin`.
+Installs `vibe` and `vibed` to `~/.local/bin`. Requires macOS (Linux support is experimental).
 
-### Build From Source (macOS/Linux)
+### Build from source
 
 ```bash
-# Clone and build
 git clone https://github.com/getaifs/vibefs.git
 cd vibefs
 cargo build --release
-
-# Install from local build (cross-platform)
 ./dev_scripts/install.sh
 ```
 
-## Quick Start
-
-### 1. Initialize VibeFS
-
-Initialize VibeFS for an existing Git repository:
+## Usage
 
 ```bash
 cd /path/to/your/repo
-vibe init
-```
-
-This creates a `.vibe/` directory with:
-- `metadata.db`: RocksDB store for inode mappings
-- `sessions/`: Per-agent workspace directories
-- `cache/`: Shared build artifact cache
-
-### 2. Spawn a Vibe Workspace
-
-Create an isolated workspace for an AI agent:
-
-```bash
-vibe spawn agent-1
-```
-
-This creates:
-- A session directory at `.vibe/sessions/agent-1/`
-- An NFS mount (macOS automatically; Linux requires a manual `sudo mount` step shown in output)
-- Automatic dirty file tracking when working through the NFS mount
-
-### 3. Work in the Workspace
-
-Work directly in the NFS mount point (printed by `vibe spawn`):
-
-```bash
-# Use vibe sh to run commands in the session
-vibe sh -s agent-1 -c "echo 'hello' > newfile.txt"
-
-# Or launch an agent directly
-vibe launch claude --session agent-1
-```
-
-Changes are automatically tracked by the daemon.
-
-**Linux note**: `vibe spawn` prints the exact `sudo mount` command you need. If you skip mounting, you can still work directly in `.vibe/sessions/<id>` and `vibe promote` will scan the session directory for changes.
-
-### 4. Create Snapshots (Optional)
-
-Take zero-cost snapshots at any point:
-
-```bash
-vibe snapshot agent-1
-```
-
-### 5. Promote Changes to Git
-
-Serialize agent work into a Git commit:
-
-```bash
-vibe promote agent-1
-```
-
-This:
-- Hashes modified files as Git blobs
-- Creates a new Git tree
-- Commits with HEAD as parent
-- Points `refs/vibes/agent-1` to the new commit
-
-### 6. Merge to Main (Manual)
-
-After promotion, use standard Git commands to merge:
-
-```bash
+vibe new agent-1          # create session, enter shell at NFS mount
+# ... edit files, run builds ...
+vibe diff                 # see what changed
+vibe commit               # commit to refs/vibes/agent-1
+exit                      # leave session
 git merge refs/vibes/agent-1
-# or
-git cherry-pick refs/vibes/agent-1
 ```
 
-### 7. Close Session
+Sessions auto-detect — run `vibe diff`, `vibe save`, `vibe commit` from inside the mount without specifying a session name.
 
-When done, close the session:
+## Commands
+
+```
+Sessions:
+  new       Create a new session and enter shell
+  attach    Attach to an existing session
+  kill      Kill a session (unmount and clean up)
+
+Versioning:
+  save      Create a checkpoint of session state
+  undo      Restore from checkpoint, or reset (--hard)
+  commit    Commit session changes to a Git branch
+  diff      Show unified diff of session changes
+
+Info:
+  ls        List sessions and show status
+
+System:
+  init      Initialize VibeFS for a Git repository
+  rebase    Rebase session to current HEAD
+  daemon    Daemon management commands
+```
+
+## Giving agents access
+
+`vibe init` auto-appends a workflow guide to your `CLAUDE.md` (or creates `AGENTS.md`). You can also paste this into any agent's system prompt:
+
+```
+This repo uses VibeFS. You are working inside a VibeFS mount — an isolated
+virtual filesystem backed by Git. Your changes are tracked automatically.
+
+Key commands (run from inside the mount, no session name needed):
+  vibe diff          Show what you changed
+  vibe save          Checkpoint current state
+  vibe undo --hard   Discard all changes, reset to base commit
+  vibe commit        Commit changes to a Git ref
+
+Do NOT use git commands — this mount has no .git directory.
+Use vibe diff instead of git diff, and vibe commit instead of git commit.
+```
+
+## Launching agents
 
 ```bash
-vibe close agent-1
+vibe new --agent claude       # launch Claude Code in a new session
+vibe new --agent cursor       # launch Cursor
+vibe new --agent aider        # launch aider
+vibe new my-task --agent claude -- --model sonnet  # with extra args
 ```
 
-## Core Commands
+## How it works
 
-| Command | Description |
-|---------|-------------|
-| `vibe init` | Initialize VibeFS for a Git repository |
-| `vibe spawn <id>` | Create an isolated agent workspace with NFS mount |
-| `vibe sh -s <id>` | Execute commands in a session's mount point |
-| `vibe launch <agent>` | Spawn session and launch an agent (claude, cursor, etc.) |
-| `vibe snapshot <id>` | Take a zero-cost CoW snapshot |
-| `vibe restore <id>` | Restore session from a snapshot |
-| `vibe promote <id>` | Serialize changes into a Git commit |
-| `vibe rebase <id>` | Move a session's base commit to current HEAD |
-| `vibe close <id>` | Unmount and clean up a session |
-| `vibe status` | Show daemon and session status |
-| `vibe diff <id>` | Show unified diff of session changes |
-| `vibe inspect <id>` | Inspect session metadata for debugging |
-| `vibe purge` | Stop daemon and delete all `.vibe` data for the repo |
+Each session is a lightweight overlay:
 
-## Architecture
-
-### Storage Layout
+- **Reads**: Served from Git's object database (zero-copy)
+- **Writes**: Go to `.vibe/sessions/<name>/` (the session delta)
+- **Dirty tracking**: The NFS daemon records which files were written
+- **Commit**: Hashes dirty files as Git blobs, creates a tree + commit at `refs/vibes/<name>`
+- **Snapshots**: Uses APFS clonefile for instant, zero-cost checkpoints
 
 ```
-<project-root>/
-├── .git/                 # Standard Git ODB (source of truth)
-├── .vibe/                # VibeFS Sidecar
-│   ├── metadata.db       # RocksDB: Inode <-> Oid mapping
-│   ├── sessions/         # Writable deltas per vibe-id
-│   │   ├── <vibe-id>/    # CoW layer for specific agent
-│   │   └── <vibe-id>.json # Session metadata
-│   └── cache/            # Global CAS for build artifacts
+.vibe/
+├── metadata.db          # RocksDB: inode mappings
+├── sessions/
+│   ├── <name>/          # writable overlay (dirty files land here)
+│   └── <name>.json      # session metadata (port, base commit)
+└── cache/               # shared build artifacts (symlinked into mounts)
 ```
 
-### Mount Points
+Build artifact directories (`target/`, `node_modules/`, etc.) are automatically symlinked to per-session local storage to avoid NFS performance issues and are excluded from commits.
 
-```
-macOS:  ~/Library/Caches/vibe/mounts/<repo>-<session>/
-Linux:  ~/.cache/vibe/mounts/<repo>-<session>/
-```
+## Requirements
 
-### Key Concepts
+- macOS with APFS (default on modern macOS)
+- Git 2.30+
+- Rust 1.70+ (build from source only)
 
-1. **Non-Invasiveness**: `.git` is the source of truth; VibeFS is a sidecar overlay
-2. **Locality**: All metadata lives in `.vibe/`
-3. **Virtualization**: Workspaces are ephemeral NFS mounts
-4. **Cheap Snapshots**: Uses APFS clonefile / Linux reflinks for zero-cost snapshots
-5. **Automatic Tracking**: Daemon tracks dirty files via NFS write operations
+## License
 
-### Technology Stack
-
-- **Rust**: Core implementation language
-- **gitoxide (gix)**: High-speed Git operations
-- **RocksDB**: Metadata persistence
-- **nfsserve**: Userspace NFSv3 server
-- **Ratatui**: Terminal UI dashboard
-
-## Development
-
-### Project Structure
-
-```
-src/
-├── db/         # RocksDB metadata store
-├── git/        # Git integration via gitoxide
-├── nfs/        # NFS server implementation
-├── commands/   # CLI command implementations
-├── tui/        # Dashboard UI
-├── bin/        # vibed daemon
-├── lib.rs      # Library root
-└── main.rs     # CLI entry point
-
-tests/
-├── integration_tests.rs  # Rust integration tests
-└── workflow_tests.sh     # Bash workflow tests
-```
-
-### Running Tests
-
-```bash
-# Run Rust tests
-cargo test
-
-# Run workflow tests (requires built binaries)
-./tests/workflow_tests.sh
-```
+MIT
