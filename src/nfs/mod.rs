@@ -12,6 +12,7 @@ use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 use crate::db::{InodeMetadata, MetadataStore};
@@ -33,8 +34,10 @@ pub struct VibeNFS {
     vibe_id: String,
     /// Cache of parent -> children mappings for directory enumeration
     dir_children: Arc<RwLock<HashMap<fileid3, Vec<fileid3>>>>,
-    /// Stable timestamp (epoch secs) set at server start, used as fallback for inodes with mtime=0
-    init_time: u64,
+    /// Stable timestamp (epoch secs) set at server start, used as fallback for inodes with mtime=0.
+    /// Arc<AtomicU64> so bumping it on the daemon's clone also affects the NFS server's clone
+    /// (forces NFS clients to re-read attributes).
+    init_time: Arc<AtomicU64>,
 }
 
 impl VibeNFS {
@@ -56,9 +59,39 @@ impl VibeNFS {
             repo_path,
             vibe_id,
             dir_children: Arc::new(RwLock::new(HashMap::new())),
-            init_time,
+            init_time: Arc::new(AtomicU64::new(init_time)),
         }
     }
+
+    /// Clear the directory children cache and rebuild it from metadata.
+    /// Used after reset/rebase to ensure NFS serves updated directory listings.
+    pub async fn invalidate_and_rebuild_cache(&self) -> Result<()> {
+        {
+            let mut cache = self.dir_children.write().await;
+            cache.clear();
+        }
+        self.build_directory_cache().await
+    }
+
+    /// Bump the init_time timestamp so NFS clients see new mtime/ctime values
+    /// and re-read file attributes instead of using cached data.
+    pub fn bump_init_time(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.init_time.store(now, Ordering::Release);
+    }
+    // ... (omitting build_directory_cache and helpers for brevity if not changing)
+
+    // (Actually I need to match exact context to replace safely. 
+    // Since I cannot match everything easily, I will replace constants first, then readdir.)
+    
+    // WAIT. `replace` tool requires EXACT match. 
+    // I will do 2 replaces.
+    // 1. Change FAKE_ROOT_PARENT_ID.
+    // 2. Change readdir.
+
 
     /// Initialize the directory children cache from metadata store
     pub async fn build_directory_cache(&self) -> Result<()> {
@@ -200,7 +233,7 @@ impl VibeNFS {
         // Use stored mtime if available, otherwise fall back to server init time.
         // This ensures timestamps are stable across GETATTR calls, which prevents
         // tools from thinking files changed between read and write operations.
-        let ts = if metadata.mtime > 0 { metadata.mtime } else { self.init_time };
+        let ts = if metadata.mtime > 0 { metadata.mtime } else { self.init_time.load(Ordering::Acquire) };
 
         fattr3 {
             ftype,
@@ -233,6 +266,7 @@ impl VibeNFS {
 
     /// Create the root directory fattr
     fn root_fattr(&self, fileid: fileid3) -> fattr3 {
+        let ts = self.init_time.load(Ordering::Acquire);
         fattr3 {
             ftype: ftype3::NF3DIR,
             mode: 0o755,
@@ -248,15 +282,15 @@ impl VibeNFS {
             fsid: 1,
             fileid,
             atime: nfstime3 {
-                seconds: self.init_time as u32,
+                seconds: ts as u32,
                 nseconds: 0,
             },
             mtime: nfstime3 {
-                seconds: self.init_time as u32,
+                seconds: ts as u32,
                 nseconds: 0,
             },
             ctime: nfstime3 {
-                seconds: self.init_time as u32,
+                seconds: ts as u32,
                 nseconds: 0,
             },
         }

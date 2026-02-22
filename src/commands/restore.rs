@@ -64,38 +64,6 @@ pub async fn restore<P: AsRef<Path>>(
         println!("  Backed up current state to snapshot '{}'", backup_name);
     }
 
-    // If daemon is running, unmount and unexport the session first
-    // so we can acquire the metadata.db lock for dirty tracking updates
-    let daemon_running = DaemonClient::is_running(repo_path).await;
-    let mount_point = if daemon_running {
-        // Compute mount point path (same logic as daemon)
-        let repo_name = repo_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "repo".to_string());
-        let mp = platform::get_vibe_mounts_dir()
-            .join(format!("{}-{}", repo_name, session));
-
-        // Force unmount first so NFS client disconnects and the server task can exit
-        if mp.exists() {
-            platform::unmount_nfs_sync(&mp.to_string_lossy()).ok();
-        }
-
-        // Unexport from daemon (stops NFS server, releases metadata.db lock)
-        let mut client = DaemonClient::connect(repo_path).await?;
-        match client.unexport_session(session).await? {
-            DaemonResponse::SessionUnexported { .. } => {}
-            DaemonResponse::Error { message } => {
-                eprintln!("Warning: unexport failed: {}", message);
-            }
-            _ => {}
-        }
-
-        Some(mp)
-    } else {
-        None
-    };
-
     // Delete current session delta
     println!("  Removing current session state...");
     std::fs::remove_dir_all(&session_dir)
@@ -119,49 +87,18 @@ pub async fn restore<P: AsRef<Path>>(
         copy_recursive(&snapshot_dir, &session_dir)?;
     }
 
-    // Clear and rebuild dirty tracking.
-    // When daemon is running, use the per-session metadata.db (restored from snapshot).
-    // The base .vibe/metadata.db is still locked by the daemon — don't touch it.
-    // When daemon is not running, use the base metadata.db.
-    let db_path = if daemon_running {
-        session_dir.join("metadata.db")
-    } else {
-        vibe_dir.join("metadata.db")
-    };
+    // Clear and rebuild dirty tracking
+    let db_path = vibe_dir.join("metadata.db");
     if db_path.exists() {
         println!("  Updating dirty file tracking...");
         let store = MetadataStore::open(&db_path)
-            .context("Failed to open metadata store")?;
+            .context("Failed to open metadata store. If daemon is running, stop it first with 'vibe daemon stop'")?;
 
         // Clear existing dirty markers
         store.clear_dirty()?;
 
         // Re-scan restored files and mark as dirty
         mark_files_dirty(&session_dir, &store, "")?;
-
-        // Drop the store explicitly before re-export so daemon can reacquire
-        drop(store);
-    }
-
-    // Re-export session if daemon was running
-    if let Some(mp) = mount_point {
-        let mut client = DaemonClient::connect(repo_path).await?;
-        match client.export_session(session).await? {
-            DaemonResponse::SessionExported { mount_point, nfs_port, .. } => {
-                if let Err(e) = platform::mount_nfs(&mount_point, nfs_port) {
-                    eprintln!("Warning: mount issue: {}", e);
-                }
-            }
-            DaemonResponse::Error { message } => {
-                eprintln!("Warning: re-export failed: {}. Re-export manually with: vibe export {}", message, session);
-            }
-            _ => {}
-        }
-
-        // Clean up stale mount point if it's different from the new one
-        if mp.exists() {
-            std::fs::remove_dir(&mp).ok();
-        }
     }
 
     println!("✓ Session '{}' restored from snapshot '{}'", session, snapshot_name);
@@ -213,10 +150,37 @@ pub async fn reset_hard<P: AsRef<Path>>(
         }
     }
 
-    // If daemon is running, unmount and unexport the session first
+    // If daemon is running, try RPC reset (keeps NFS alive, no bricked shells)
     let daemon_running = DaemonClient::is_running(repo_path).await;
+    if daemon_running {
+        let rpc_result = async {
+            let mut client = DaemonClient::connect(repo_path).await?;
+            client.reset_session(session, no_backup).await
+        }
+        .await;
+
+        match rpc_result {
+            Ok(DaemonResponse::SessionReset { .. }) => {
+                println!("Session '{}' reset to base commit.", session);
+                if !no_backup {
+                    println!("  (backup saved — use 'vibe undo' to see checkpoints)");
+                }
+                return Ok(());
+            }
+            Ok(DaemonResponse::Error { message }) => {
+                eprintln!("Warning: daemon reset failed: {}. Falling back to legacy path.", message);
+            }
+            Err(e) => {
+                eprintln!("Warning: daemon RPC failed: {}. Falling back to legacy path.", e);
+            }
+            _ => {
+                eprintln!("Warning: unexpected daemon response. Falling back to legacy path.");
+            }
+        }
+    }
+
+    // Legacy path: unmount, clear, re-export (used when daemon not running or RPC failed)
     let mount_point = if daemon_running {
-        // Compute mount point path (same logic as daemon)
         let repo_name = repo_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -224,12 +188,10 @@ pub async fn reset_hard<P: AsRef<Path>>(
         let mp = platform::get_vibe_mounts_dir()
             .join(format!("{}-{}", repo_name, session));
 
-        // Force unmount first so NFS client disconnects and the server task can exit
         if mp.exists() {
             platform::unmount_nfs_sync(&mp.to_string_lossy()).ok();
         }
 
-        // Unexport from daemon (stops NFS server, releases metadata.db lock)
         let mut client = DaemonClient::connect(repo_path).await?;
         match client.unexport_session(session).await? {
             DaemonResponse::SessionUnexported { .. } => {}
@@ -244,8 +206,6 @@ pub async fn reset_hard<P: AsRef<Path>>(
         None
     };
 
-    // Remove all files in session dir (including metadata.db — it will be
-    // re-cloned from the base on next export, with clean dirty markers)
     println!("Discarding all changes in session '{}'...", session);
     for entry in std::fs::read_dir(&session_dir)? {
         let entry = entry?;
@@ -258,7 +218,6 @@ pub async fn reset_hard<P: AsRef<Path>>(
         }
     }
 
-    // Re-export session if daemon was running
     if let Some(mp) = mount_point {
         let mut client = DaemonClient::connect(repo_path).await?;
         match client.export_session(session).await? {
@@ -273,7 +232,6 @@ pub async fn reset_hard<P: AsRef<Path>>(
             _ => {}
         }
 
-        // Clean up stale mount point if it's different from the new one
         if mp.exists() {
             std::fs::remove_dir(&mp).ok();
         }

@@ -25,15 +25,17 @@ const IDLE_TIMEOUT_SECS: u64 = 20 * 60;
 /// Session state managed by the daemon
 struct Session {
     vibe_id: String,
-    #[allow(dead_code)]
     session_dir: PathBuf,
     mount_point: PathBuf,
     nfs_port: u16,
     created_at: Instant,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
     nfs_task: Option<tokio::task::JoinHandle<()>>,
-    #[allow(dead_code)]
     metadata: Arc<RwLock<MetadataStore>>,
+    /// Clone of the VibeNFS instance serving this session.
+    /// Since all fields are Arc-wrapped, modifying this clone's caches
+    /// also affects the NFS server's copy.
+    nfs: VibeNFS,
 }
 
 /// Daemon state shared across handlers
@@ -67,6 +69,10 @@ enum DaemonRequest {
     ExportSession { vibe_id: String },
     /// Unexport/remove a session
     UnexportSession { vibe_id: String },
+    /// Reset session (discard all changes, keep NFS alive)
+    ResetSession { vibe_id: String, no_backup: bool },
+    /// Rebase session to current HEAD (keep NFS alive)
+    RebaseSession { vibe_id: String, force: bool },
     /// List active sessions
     ListSessions,
     /// Graceful shutdown
@@ -95,6 +101,15 @@ enum DaemonResponse {
     },
     SessionUnexported {
         vibe_id: String,
+    },
+    SessionReset {
+        vibe_id: String,
+    },
+    SessionRebased {
+        vibe_id: String,
+        old_base: String,
+        new_base: String,
+        reconciled_count: usize,
     },
     Sessions {
         sessions: Vec<SessionInfo>
@@ -225,6 +240,10 @@ async fn handle_client(
                                         vibe_id.clone()
                                     );
 
+                                    // Clone before passing to NFSTcpListener so we keep
+                                    // a handle with shared Arc-wrapped state.
+                                    let nfs_clone = nfs.clone();
+
                                     if let Err(e) = nfs.build_directory_cache().await {
                                         DaemonResponse::Error {
                                             message: format!("Failed to build cache: {}", e),
@@ -259,6 +278,7 @@ async fn handle_client(
                                                     shutdown_tx: sess_shutdown_tx,
                                                     nfs_task: Some(nfs_handle),
                                                     metadata: session_metadata,
+                                                    nfs: nfs_clone,
                                                 };
 
                                                 state_guard.sessions.insert(vibe_id.clone(), session);
@@ -304,6 +324,56 @@ async fn handle_client(
                         eprintln!("[vibed] NFS task for {} stopped", vibe_id);
                     }
                     DaemonResponse::SessionUnexported { vibe_id }
+                } else {
+                    DaemonResponse::Error {
+                        message: format!("Session '{}' not found", vibe_id),
+                    }
+                }
+            }
+
+            DaemonRequest::ResetSession { vibe_id, no_backup } => {
+                let state_guard = state.lock().await;
+                if let Some(session) = state_guard.sessions.get(&vibe_id) {
+                    let session_dir = session.session_dir.clone();
+                    let nfs = session.nfs.clone();
+                    let metadata = session.metadata.clone();
+                    let sessions_dir = state_guard.repo_path.join(".vibe/sessions");
+                    drop(state_guard);
+
+                    match handle_reset_session(&vibe_id, &session_dir, &sessions_dir, &nfs, &metadata, no_backup).await {
+                        Ok(_) => DaemonResponse::SessionReset { vibe_id },
+                        Err(e) => DaemonResponse::Error {
+                            message: format!("Reset failed: {}", e),
+                        },
+                    }
+                } else {
+                    DaemonResponse::Error {
+                        message: format!("Session '{}' not found", vibe_id),
+                    }
+                }
+            }
+
+            DaemonRequest::RebaseSession { vibe_id, force } => {
+                let state_guard = state.lock().await;
+                if let Some(session) = state_guard.sessions.get(&vibe_id) {
+                    let session_dir = session.session_dir.clone();
+                    let nfs = session.nfs.clone();
+                    let metadata = session.metadata.clone();
+                    let repo_path = state_guard.repo_path.clone();
+                    let git = state_guard.git.clone();
+                    drop(state_guard);
+
+                    match handle_rebase_session(&vibe_id, &session_dir, &repo_path, &nfs, &metadata, &git, force).await {
+                        Ok((old_base, new_base, reconciled_count)) => DaemonResponse::SessionRebased {
+                            vibe_id,
+                            old_base,
+                            new_base,
+                            reconciled_count,
+                        },
+                        Err(e) => DaemonResponse::Error {
+                            message: format!("Rebase failed: {}", e),
+                        },
+                    }
                 } else {
                     DaemonResponse::Error {
                         message: format!("Session '{}' not found", vibe_id),
@@ -429,6 +499,258 @@ async fn setup_artifact_symlinks(
         }
     }
 
+    Ok(())
+}
+
+/// Handle ResetSession: clear session files and dirty markers, rebuild cache.
+/// NFS server stays running throughout — no unmount/remount needed.
+async fn handle_reset_session(
+    vibe_id: &str,
+    session_dir: &Path,
+    sessions_dir: &Path,
+    nfs: &VibeNFS,
+    metadata: &Arc<RwLock<MetadataStore>>,
+    no_backup: bool,
+) -> Result<()> {
+    // Optional backup via clonefile snapshot
+    if !no_backup {
+        let backup_name = format!(
+            "pre-reset-{}",
+            chrono::Utc::now().format("%Y%m%d_%H%M%S")
+        );
+        let backup_dir = sessions_dir.join(format!("{}_snapshot_{}", vibe_id, backup_name));
+        eprintln!("[vibed] Creating backup snapshot: {}", backup_dir.display());
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            let src_c = CString::new(session_dir.as_os_str().as_bytes())?;
+            let dst_c = CString::new(backup_dir.as_os_str().as_bytes())?;
+            let ret = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
+            if ret != 0 {
+                eprintln!(
+                    "[vibed] Warning: clonefile backup failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Fallback: cp -r
+            let _ = std::process::Command::new("cp")
+                .args(["-r", &session_dir.to_string_lossy(), &backup_dir.to_string_lossy()])
+                .output();
+        }
+    }
+
+    // Delete session files (keep symlinks for artifact dirs and metadata.db)
+    clear_session_files(session_dir)?;
+
+    // Clear dirty markers in metadata
+    {
+        let store = metadata.write().await;
+        store.clear_dirty()?;
+    }
+
+    // Rebuild the directory cache so NFS serves updated listings
+    nfs.invalidate_and_rebuild_cache().await?;
+
+    // Bump init_time so NFS clients see new timestamps and re-read attributes
+    nfs.bump_init_time();
+
+    eprintln!("[vibed] Session '{}' reset successfully", vibe_id);
+    Ok(())
+}
+
+/// Handle RebaseSession: reconcile stale files, update spawn_commit, rebuild cache.
+/// NFS server stays running throughout — no unmount/remount needed.
+async fn handle_rebase_session(
+    vibe_id: &str,
+    session_dir: &Path,
+    repo_path: &Path,
+    nfs: &VibeNFS,
+    metadata: &Arc<RwLock<MetadataStore>>,
+    git: &Arc<RwLock<GitRepo>>,
+    _force: bool,
+) -> Result<(String, String, usize)> {
+    use vibefs::commands::spawn::SpawnInfo;
+
+    // Load SpawnInfo
+    let mut spawn_info = SpawnInfo::load(repo_path, vibe_id)
+        .with_context(|| format!("Session '{}' not found", vibe_id))?;
+
+    // Get current HEAD
+    let head_commit = {
+        let g = git.read().await;
+        g.head_commit().context("Failed to get HEAD commit")?
+    };
+
+    let old_base = spawn_info
+        .spawn_commit
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Already at HEAD?
+    if old_base == head_commit {
+        return Ok((old_base, head_commit, 0));
+    }
+
+    eprintln!(
+        "[vibed] Rebasing '{}': {} -> {}",
+        vibe_id,
+        &old_base[..12.min(old_base.len())],
+        &head_commit[..12.min(head_commit.len())]
+    );
+
+    // Reconcile stale session files: remove files that match the new HEAD
+    let reconciled = {
+        let g = git.read().await;
+        let session_files = list_session_files_for_daemon(session_dir)?;
+        let mut reconciled = 0usize;
+
+        for file_path in &session_files {
+            let session_file = session_dir.join(file_path);
+            if !session_file.exists() || !session_file.is_file() {
+                continue;
+            }
+
+            let session_content = match std::fs::read(&session_file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            match g.read_file_at_commit(&head_commit, file_path) {
+                Ok(Some(head_content)) if head_content == session_content => {
+                    if let Err(e) = std::fs::remove_file(&session_file) {
+                        eprintln!(
+                            "[vibed] Warning: failed to remove stale file {}: {}",
+                            file_path, e
+                        );
+                        continue;
+                    }
+
+                    // Clean up empty parent directories
+                    if let Some(parent) = session_file.parent() {
+                        let _ = remove_empty_parents_daemon(parent, session_dir);
+                    }
+
+                    // Clear dirty marker
+                    {
+                        let store = metadata.write().await;
+                        let _ = store.clear_dirty_path(file_path);
+                    }
+
+                    reconciled += 1;
+                }
+                _ => {}
+            }
+        }
+        reconciled
+    };
+
+    // Update spawn_commit in session JSON
+    spawn_info.spawn_commit = Some(head_commit.clone());
+    let info_path = repo_path
+        .join(".vibe/sessions")
+        .join(format!("{}.json", vibe_id));
+    let info_json = serde_json::to_string_pretty(&spawn_info)?;
+    std::fs::write(&info_path, info_json)?;
+
+    // Rebuild the directory cache so NFS serves updated listings
+    nfs.invalidate_and_rebuild_cache().await?;
+
+    // Bump init_time so NFS clients see new timestamps and re-read attributes
+    nfs.bump_init_time();
+
+    eprintln!(
+        "[vibed] Session '{}' rebased ({} stale files reconciled)",
+        vibe_id, reconciled
+    );
+    Ok((old_base, head_commit, reconciled))
+}
+
+/// Clear all user files from a session directory, keeping symlinks (artifact dirs)
+/// and metadata.db.
+fn clear_session_files(session_dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(session_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+
+        // Keep symlinks (artifact dirs like target/, node_modules/)
+        if ft.is_symlink() {
+            continue;
+        }
+
+        // Keep metadata.db (per-session RocksDB store)
+        if let Some(name) = path.file_name() {
+            if name == "metadata.db" {
+                continue;
+            }
+        }
+
+        if ft.is_file() {
+            std::fs::remove_file(&path)?;
+        } else if ft.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// List files in a session directory (for daemon use).
+/// Skips symlinks, metadata.db, and macOS metadata files.
+fn list_session_files_for_daemon(session_dir: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+
+    fn walk_dir(dir: &Path, base: &Path, files: &mut Vec<String>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_symlink() {
+                continue;
+            }
+            if let Some(name) = path.file_name() {
+                if name == "metadata.db" {
+                    continue;
+                }
+            }
+
+            if path.is_dir() {
+                walk_dir(&path, base, files)?;
+            } else if let Ok(rel_path) = path.strip_prefix(base) {
+                let rel_str = rel_path.to_string_lossy().to_string();
+                if !rel_str.starts_with("._") && !rel_str.ends_with(".DS_Store") {
+                    files.push(rel_str);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    if session_dir.exists() {
+        walk_dir(session_dir, session_dir, &mut files)?;
+    }
+    Ok(files)
+}
+
+/// Remove empty parent directories up to (but not including) the base directory.
+fn remove_empty_parents_daemon(dir: &Path, base: &Path) -> Result<()> {
+    let mut current = dir;
+    while current != base {
+        if current.read_dir()?.next().is_none() {
+            std::fs::remove_dir(current)?;
+        } else {
+            break;
+        }
+        match current.parent() {
+            Some(p) => current = p,
+            None => break,
+        }
+    }
     Ok(())
 }
 

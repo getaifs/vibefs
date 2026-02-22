@@ -25,6 +25,8 @@ pub mod daemon_ipc {
         Status,
         ExportSession { vibe_id: String },
         UnexportSession { vibe_id: String },
+        ResetSession { vibe_id: String, no_backup: bool },
+        RebaseSession { vibe_id: String, force: bool },
         ListSessions,
         Shutdown,
     }
@@ -51,6 +53,15 @@ pub mod daemon_ipc {
         },
         SessionUnexported {
             vibe_id: String,
+        },
+        SessionReset {
+            vibe_id: String,
+        },
+        SessionRebased {
+            vibe_id: String,
+            old_base: String,
+            new_base: String,
+            reconciled_count: usize,
         },
         Sessions {
             sessions: Vec<SessionInfo>,

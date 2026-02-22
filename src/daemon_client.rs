@@ -145,6 +145,24 @@ impl DaemonClient {
         self.request(DaemonRequest::ListSessions).await
     }
 
+    /// Reset a session (discard all changes, keep NFS alive)
+    pub async fn reset_session(&mut self, vibe_id: &str, no_backup: bool) -> Result<DaemonResponse> {
+        self.request(DaemonRequest::ResetSession {
+            vibe_id: vibe_id.to_string(),
+            no_backup,
+        })
+        .await
+    }
+
+    /// Rebase a session to current HEAD (keep NFS alive)
+    pub async fn rebase_session(&mut self, vibe_id: &str, force: bool) -> Result<DaemonResponse> {
+        self.request(DaemonRequest::RebaseSession {
+            vibe_id: vibe_id.to_string(),
+            force,
+        })
+        .await
+    }
+
     /// Request daemon shutdown
     pub async fn shutdown(&mut self) -> Result<DaemonResponse> {
         self.request(DaemonRequest::Shutdown).await

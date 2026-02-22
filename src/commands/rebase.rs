@@ -91,11 +91,35 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
 
     println!("\n✓ Session '{}' rebased to {}", session, &head_commit[..7]);
 
-    // Auto-restart the NFS mount so the session serves the updated Git tree
+    // If daemon is running, try RPC rebase (keeps NFS alive, no bricked shells)
     if DaemonClient::is_running(repo_path).await {
+        let rpc_result = async {
+            let mut client = DaemonClient::connect(repo_path).await?;
+            client.rebase_session(session, force).await
+        }
+        .await;
+
+        match rpc_result {
+            Ok(DaemonResponse::SessionRebased { reconciled_count, .. }) => {
+                if reconciled_count > 0 {
+                    println!("  Cleaned up {} stale file(s) that match HEAD", reconciled_count);
+                }
+                return Ok(());
+            }
+            Ok(DaemonResponse::Error { message }) => {
+                eprintln!("Warning: daemon rebase failed: {}. Falling back to legacy path.", message);
+            }
+            Err(e) => {
+                eprintln!("Warning: daemon RPC failed: {}. Falling back to legacy path.", e);
+            }
+            _ => {
+                eprintln!("Warning: unexpected daemon response. Falling back to legacy path.");
+            }
+        }
+
+        // Legacy fallback: unmount, reconcile, re-export
         print!("  Restarting NFS mount...");
 
-        // Unexport the session (stops the old NFS server, releases metadata.db lock)
         let mut client = DaemonClient::connect(repo_path).await?;
         match client.unexport_session(session).await? {
             DaemonResponse::SessionUnexported { .. } => {}
@@ -105,11 +129,9 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
             _ => {}
         }
 
-        // Unmount the stale NFS mount point
         let old_mount = spawn_info.mount_point.to_string_lossy().to_string();
         platform::unmount_nfs_sync(&old_mount).ok();
 
-        // Reconcile stale session files: remove files that match the new HEAD
         let session_metadata_db = session_dir.join("metadata.db");
         match reconcile_session_files(&git, &session_dir, &head_commit, Some(&session_metadata_db)) {
             Ok(0) => {}
@@ -117,27 +139,22 @@ pub async fn rebase<P: AsRef<Path>>(repo_path: P, session: &str, force: bool) ->
             Err(e) => eprintln!("\n  Warning: reconciliation error: {}", e),
         }
 
-        // Re-export the session (creates new NFS server, reuses existing metadata)
         let mut client = DaemonClient::connect(repo_path).await?;
         match client.export_session(session).await? {
             DaemonResponse::SessionExported { nfs_port, mount_point, .. } => {
-                // Re-mount NFS at the new port
                 match platform::mount_nfs(&mount_point, nfs_port) {
                     Ok(_) => {
                         println!(" done");
                         println!("  NFS mounted at: {}", mount_point);
 
-                        // Update SpawnInfo with new port
                         spawn_info.port = nfs_port;
                         let info_json = serde_json::to_string_pretty(&spawn_info)?;
                         std::fs::write(&info_path, info_json)?;
 
-                        // Re-register mount
                         if let Err(e) = platform::register_mount(&mount_point, repo_path) {
                             eprintln!("  Warning: Failed to register mount: {}", e);
                         }
 
-                        // If running from inside the mount, the shell's cwd is now stale
                         if is_cwd_inside_mount(&mount_point) {
                             println!("\n  Your shell's working directory was invalidated by the remount.");
                             println!("  Run: cd {}", mount_point);
