@@ -493,14 +493,9 @@ async fn main() -> Result<()> {
                     let agent_args: Vec<String> = args.iter().skip(1).cloned().collect();
                     commands::launch::launch(&repo_path, agent, None, &agent_args).await?;
                 } else {
-                    // Unknown command - show helpful error
-                    let known = commands::launch::KNOWN_AGENTS.join(", ");
                     anyhow::bail!(
-                        "Unknown command '{}'\n\n\
-                         Known agent shortcuts: {}\n\n\
-                         Run 'vibe --help' to see available commands.",
-                        agent,
-                        known
+                        "Unknown command '{}'. Run 'vibe --help' to see available commands.",
+                        agent
                     );
                 }
             } else {
