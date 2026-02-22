@@ -50,6 +50,11 @@ pub async fn snapshot<P: AsRef<Path>>(repo_path: P, vibe_id: &str) -> Result<()>
 
 /// Create a snapshot with a custom name
 pub async fn snapshot_with_name<P: AsRef<Path>>(repo_path: P, vibe_id: &str, name: &str) -> Result<()> {
+    let snapshot_name = name.trim();
+    if snapshot_name.is_empty() {
+        anyhow::bail!("Checkpoint name cannot be empty");
+    }
+
     // Validate that we're running from the correct directory
     let _validated_root = cwd_validation::validate_cwd()
         .context("Cannot create snapshot")?;
@@ -63,14 +68,14 @@ pub async fn snapshot_with_name<P: AsRef<Path>>(repo_path: P, vibe_id: &str, nam
     }
 
     // Create snapshot with custom name
-    let snapshot_name = format!("{}_snapshot_{}", vibe_id, name);
-    let snapshot_dir = vibe_dir.join("sessions").join(&snapshot_name);
+    let snapshot_dir_name = format!("{}_snapshot_{}", vibe_id, snapshot_name);
+    let snapshot_dir = vibe_dir.join("sessions").join(&snapshot_dir_name);
 
     if snapshot_dir.exists() {
-        anyhow::bail!("Snapshot '{}' already exists", name);
+        anyhow::bail!("Snapshot '{}' already exists", snapshot_name);
     }
 
-    println!("Saving checkpoint: {}", name);
+    println!("Saving checkpoint: {}", snapshot_name);
 
     // Use platform-specific CoW copy
     #[cfg(target_os = "macos")]
@@ -88,7 +93,7 @@ pub async fn snapshot_with_name<P: AsRef<Path>>(repo_path: P, vibe_id: &str, nam
         copy_recursive(&session_dir, &snapshot_dir)?;
     }
 
-    println!("✓ Checkpoint saved: {}", name);
+    println!("✓ Checkpoint saved: {}", snapshot_name);
 
     Ok(())
 }

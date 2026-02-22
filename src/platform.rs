@@ -155,7 +155,7 @@ pub fn unmount_nfs_sync(mount_point: &str) -> Result<()> {
 
 /// Get the path to the mount registry file
 fn get_mount_registry_path() -> PathBuf {
-    get_vibe_mounts_dir().parent().unwrap().join("mount-registry.json")
+    get_vibe_mounts_dir().parent().unwrap_or_else(|| Path::new("/tmp")).join("mount-registry.json")
 }
 
 /// Registry entry for a mount

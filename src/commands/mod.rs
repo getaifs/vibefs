@@ -79,8 +79,8 @@ pub fn detect_current_session(repo_path: &Path) -> Result<Option<DetectedSession
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                // Skip snapshot directories (they contain underscore timestamps)
-                if !name.contains('_') || !name.chars().any(|c| c.is_ascii_digit()) {
+                // Skip snapshot directories
+                if !name.contains("_snapshot_") {
                     session_dirs.push(name);
                 }
             }
@@ -127,7 +127,7 @@ pub fn require_session(repo_path: &Path, session: Option<String>) -> Result<Stri
             if entry.file_type()?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 // Skip snapshot directories
-                if !name.contains('_') || !name.chars().any(|c| c.is_ascii_digit()) {
+                if !name.contains("_snapshot_") {
                     sessions.push(name);
                 }
             }

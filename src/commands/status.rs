@@ -396,9 +396,6 @@ fn print_overview(output: &StatusOverview, repo_path: &Path) {
         if let Some(uptime) = output.daemon_uptime_secs {
             println!("  Uptime:       {}", format_uptime(uptime));
         }
-        if let Some(port) = output.nfs_port {
-            println!("  Global Port:  {}", port);
-        }
         println!("  Sessions:     {}", output.active_sessions.len());
 
         if !output.active_sessions.is_empty() {

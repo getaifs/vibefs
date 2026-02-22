@@ -2,6 +2,11 @@
 name = "vibefs"
 version = "0.9.3"
 edition = "2021"
+description = "Virtual filesystem for parallel AI agent workspaces, backed by Git and NFS"
+license = "MIT"
+repository = "https://github.com/getaifs/vibefs"
+homepage = "https://github.com/getaifs/vibefs"
+readme = "README.md"
 
 [dependencies]
 # Git operations

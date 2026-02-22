@@ -59,16 +59,6 @@ impl VibeNFS {
             init_time,
         }
     }
-    // ... (omitting build_directory_cache and helpers for brevity if not changing)
-
-    // (Actually I need to match exact context to replace safely. 
-    // Since I cannot match everything easily, I will replace constants first, then readdir.)
-    
-    // WAIT. `replace` tool requires EXACT match. 
-    // I will do 2 replaces.
-    // 1. Change FAKE_ROOT_PARENT_ID.
-    // 2. Change readdir.
-
 
     /// Initialize the directory children cache from metadata store
     pub async fn build_directory_cache(&self) -> Result<()> {
