@@ -172,6 +172,23 @@ impl GitRepo {
         Ok(Some(oid))
     }
 
+    /// Fast-forward merge a ref into HEAD.
+    /// Returns the new HEAD commit OID.
+    pub fn merge_ff(&self, ref_name: &str) -> Result<String> {
+        let output = Command::new("git")
+            .args(&["merge", "--ff-only", ref_name])
+            .current_dir(&self.repo_path)
+            .output()
+            .context("Failed to run git merge --ff-only")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Fast-forward merge failed: {}", stderr.trim());
+        }
+
+        self.head_commit()
+    }
+
     pub fn create_commit(&self, tree_oid: &str, parent_oid: &str, message: &str) -> Result<String> {
         let output = Command::new("git")
             .args(&["commit-tree", tree_oid, "-p", parent_oid, "-m", message])

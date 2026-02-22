@@ -105,7 +105,7 @@ async fn test_full_workflow() -> Result<()> {
     assert!(!snapshots.is_empty());
 
     // Test 5: Promote the vibe session
-    promote::promote(repo_path, "agent-1", None, None).await?;
+    promote::promote(repo_path, "agent-1", None, None, true).await?;
 
     let git = GitRepo::open(repo_path)?;
     let vibe_ref = git.get_ref("refs/vibes/agent-1")?;
@@ -162,9 +162,9 @@ async fn test_multiple_parallel_vibes() -> Result<()> {
     } // Drop metadata before promoting
 
     // Promote all vibes
-    promote::promote(repo_path, "agent-1", None, None).await?;
-    promote::promote(repo_path, "agent-2", None, None).await?;
-    promote::promote(repo_path, "agent-3", None, None).await?;
+    promote::promote(repo_path, "agent-1", None, None, true).await?;
+    promote::promote(repo_path, "agent-2", None, None, true).await?;
+    promote::promote(repo_path, "agent-3", None, None, true).await?;
 
     // Verify all have refs
     let git = GitRepo::open(repo_path)?;
@@ -229,7 +229,7 @@ async fn test_promote_without_changes() -> Result<()> {
     spawn::spawn_local(repo_path, "agent-1").await?;
 
     // Try to promote without any changes
-    promote::promote(repo_path, "agent-1", None, None).await?;
+    promote::promote(repo_path, "agent-1", None, None, true).await?;
 
     // Should complete without error, but not create a ref
     let git = GitRepo::open(repo_path)?;

@@ -16,6 +16,7 @@ pub async fn promote<P: AsRef<Path>>(
     vibe_id: &str,
     only_paths: Option<Vec<String>>,
     message: Option<&str>,
+    ref_only: bool,
 ) -> Result<()> {
     // Validate that we're running from the correct directory
     let _validated_root = cwd_validation::validate_cwd()
@@ -37,14 +38,14 @@ pub async fn promote<P: AsRef<Path>>(
                 if base_commit != &head_commit {
                     eprintln!("⚠ WARNING: Session '{}' is based on {} but HEAD is at {}",
                         vibe_id, &base_commit[..7.min(base_commit.len())], &head_commit[..7.min(head_commit.len())]);
-                    eprintln!("  The commit will be based on HEAD, not your session's base commit.");
+                    eprintln!("  The promoted commit will be based on HEAD, not your session's base commit.");
                     eprintln!("  Consider running 'vibe rebase {}' first to update.\n", vibe_id);
                 }
             }
         }
     }
 
-    println!("Committing session changes: {}", vibe_id);
+    println!("Promoting vibe session: {}", vibe_id);
 
     // Open per-session metadata store (fallback to base for backward compat)
     let metadata_path = {
@@ -108,16 +109,16 @@ pub async fn promote<P: AsRef<Path>>(
 
     if dirty_paths.is_empty() {
         if only_paths.is_some() {
-            println!("No changes matching the specified patterns to commit");
+            println!("No changes matching the specified patterns to promote");
         } else if !ignored_paths.is_empty() {
-            println!("No committable changes (all {} changes are gitignored)", ignored_paths.len());
+            println!("No promotable changes (all {} changes are gitignored)", ignored_paths.len());
         } else {
-            println!("No changes to commit");
+            println!("No changes to promote");
         }
         return Ok(());
     }
 
-    println!("Committing {} files:", dirty_paths.len());
+    println!("Promoting {} files:", dirty_paths.len());
     for path in &dirty_paths {
         println!("  - {}", path);
     }
@@ -194,7 +195,7 @@ pub async fn promote<P: AsRef<Path>>(
     // Create commit with HEAD as parent
     let commit_message = message
         .map(|m| m.to_string())
-        .unwrap_or_else(|| format!("Vibe commit: {}\n\nCommitted changes from vibe session", vibe_id));
+        .unwrap_or_else(|| format!("Vibe promotion: {}\n\nPromoted changes from vibe session", vibe_id));
 
     let commit_oid = git.create_commit(&tree_oid, &head_oid, &commit_message)
         .context("Failed to create commit")?;
@@ -208,7 +209,29 @@ pub async fn promote<P: AsRef<Path>>(
     println!("✓ Session changes committed successfully");
     println!("  Reference: {}", ref_name);
     println!("  Commit: {}", commit_oid);
-    println!("\nTo merge into main, run: git merge {}", ref_name);
+
+    if ref_only {
+        println!("\nTo merge into main, run: git merge {}", ref_name);
+    } else {
+        // Auto-merge into HEAD
+        match git.merge_ff(&ref_name) {
+            Ok(new_head) => {
+                println!("  Merged into HEAD: {}", &new_head[..12.min(new_head.len())]);
+
+                // Auto-rebase session to match new HEAD
+                match crate::commands::rebase::rebase(repo_path, vibe_id, true).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("  Warning: auto-rebase failed: {}. Run 'vibe rebase {}' manually.", e, vibe_id);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  Warning: auto-merge failed: {}", e);
+                println!("  To merge manually, run: git merge {}", ref_name);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -267,6 +290,7 @@ fn scan_directory_recursive(base: &Path, current: &Path, files: &mut Vec<String>
 pub async fn promote_all<P: AsRef<Path>>(
     repo_path: P,
     message: Option<&str>,
+    ref_only: bool,
 ) -> Result<()> {
     let repo_path = repo_path.as_ref();
     let vibe_dir = repo_path.join(".vibe");
@@ -290,7 +314,7 @@ pub async fn promote_all<P: AsRef<Path>>(
         return Ok(());
     }
 
-    println!("Committing {} sessions...", sessions.len());
+    println!("Promoting {} sessions...", sessions.len());
 
     let mut promoted = 0;
     let mut skipped = 0;
@@ -299,12 +323,12 @@ pub async fn promote_all<P: AsRef<Path>>(
     for session in &sessions {
         print!("  {}: ", session);
 
-        match promote(repo_path, session, None, message).await {
+        match promote(repo_path, session, None, message, ref_only).await {
             Ok(_) => {
                 // Check if anything was actually promoted
                 let git = GitRepo::open(repo_path)?;
                 if git.get_ref(&format!("refs/vibes/{}", session))?.is_some() {
-                    println!("✓ committed");
+                    println!("✓ promoted");
                     promoted += 1;
                 } else {
                     println!("✓ (no changes)");
@@ -318,7 +342,7 @@ pub async fn promote_all<P: AsRef<Path>>(
         }
     }
 
-    println!("\nDone. {} committed, {} skipped, {} failed.", promoted, skipped, failed);
+    println!("\nDone. {} promoted, {} skipped, {} failed.", promoted, skipped, failed);
 
     Ok(())
 }
@@ -392,8 +416,8 @@ mod tests {
             metadata.mark_dirty("new_file.txt").unwrap();
         } // metadata is dropped here, releasing the lock
 
-        // Promote
-        promote(repo_path, "test-vibe", None, None).await.unwrap();
+        // Promote (ref-only mode for test since we don't have a daemon)
+        promote(repo_path, "test-vibe", None, None, true).await.unwrap();
 
         // Verify reference was created
         let git = GitRepo::open(repo_path).unwrap();

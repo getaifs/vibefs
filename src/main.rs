@@ -112,6 +112,10 @@ enum Commands {
         /// Custom commit message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// Only create the ref, don't merge into HEAD or rebase
+        #[arg(long)]
+        ref_only: bool,
     },
 
     /// Kill a session (unmount and clean up)
@@ -351,12 +355,12 @@ async fn main() -> Result<()> {
             let session = commands::require_session(&repo_path, session)?;
             commands::rebase::rebase(&repo_path, &session, force).await?;
         }
-        Commands::Commit { session, all, only, message } => {
+        Commands::Commit { session, all, only, message, ref_only } => {
             if all {
-                commands::promote::promote_all(&repo_path, message.as_deref()).await?;
+                commands::promote::promote_all(&repo_path, message.as_deref(), ref_only).await?;
             } else {
                 let id = commands::require_session(&repo_path, session)?;
-                commands::promote::promote(&repo_path, &id, only, message.as_deref()).await?;
+                commands::promote::promote(&repo_path, &id, only, message.as_deref(), ref_only).await?;
             }
         }
         Commands::Kill { session, force, all, purge } => {
